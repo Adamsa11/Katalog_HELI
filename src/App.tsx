@@ -1,0 +1,467 @@
+import { CheckCircle2, Info } from 'lucide-react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { CatalogTable } from './components/CatalogTable';
+import { CatalogToolbar } from './components/CatalogToolbar';
+import { CategorySidebar } from './components/CategorySidebar';
+import { HelpModal } from './components/HelpModal';
+import { PaginationBar } from './components/PaginationBar';
+import { TopBar } from './components/TopBar';
+import {
+  CATALOG_COLUMNS,
+  EMPTY_COLUMN_FILTERS,
+  type CatalogMetaResponse,
+  type CatalogPart,
+  type CatalogPartsResponse,
+  type ColumnFilters,
+  type ColumnKey,
+  type SortDirection,
+} from './types/catalog';
+
+const DEFAULT_VISIBLE_COLUMNS: Record<ColumnKey, boolean> = CATALOG_COLUMNS.reduce(
+  (acc, col) => {
+    acc[col.key] = true;
+    return acc;
+  },
+  {} as Record<ColumnKey, boolean>
+);
+
+function buildQueryString(params: {
+  page: number;
+  pageSize: number;
+  sortBy: ColumnKey;
+  sortDir: SortDirection;
+  globalSearch: string;
+  truckSeries: string;
+  partGroup: string;
+  columnFilters: ColumnFilters;
+}): string {
+  const qs = new URLSearchParams();
+  qs.set('page', String(params.page));
+  qs.set('pageSize', String(params.pageSize));
+  qs.set('sortBy', params.sortBy);
+  qs.set('sortDir', params.sortDir);
+
+  if (params.globalSearch.trim()) {
+    qs.set('globalSearch', params.globalSearch.trim());
+  }
+  if (params.truckSeries !== 'all') {
+    qs.set('truckSeries', params.truckSeries);
+  }
+  if (params.partGroup !== 'all') {
+    qs.set('partGroup', params.partGroup);
+  }
+
+  for (const col of CATALOG_COLUMNS) {
+    const val = params.columnFilters[col.key]?.trim();
+    if (val) {
+      qs.set(`f_${col.key}`, val);
+    }
+  }
+
+  return qs.toString();
+}
+
+export default function App() {
+  const [meta, setMeta] = useState<CatalogMetaResponse | null>(null);
+  const [items, setItems] = useState<CatalogPart[]>([]);
+  const [total, setTotal] = useState(0);
+  const [totalIsEstimate, setTotalIsEstimate] = useState(false);
+  const [totalPages, setTotalPages] = useState(1);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(50);
+  const [sortBy, setSortBy] = useState<ColumnKey>('lp');
+  const [sortDir, setSortDir] = useState<SortDirection>('asc');
+
+  const [globalSearch, setGlobalSearch] = useState('');
+  const [truckSeries, setTruckSeries] = useState('all');
+  const [partGroup, setPartGroup] = useState('all');
+  const [columnFilters, setColumnFilters] = useState<ColumnFilters>(EMPTY_COLUMN_FILTERS);
+
+  // Debounced query mirrors for text inputs (300ms)
+  const [debouncedGlobal, setDebouncedGlobal] = useState('');
+  const [debouncedColumnFilters, setDebouncedColumnFilters] =
+    useState<ColumnFilters>(EMPTY_COLUMN_FILTERS);
+
+  const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [visibleColumns, setVisibleColumns] =
+    useState<Record<ColumnKey, boolean>>(DEFAULT_VISIBLE_COLUMNS);
+  const [columnsMenuOpen, setColumnsMenuOpen] = useState(false);
+  const [helpOpen, setHelpOpen] = useState(false);
+
+  const [copiedCode, setCopiedCode] = useState<string | null>(null);
+  const [toastMessage, setToastMessage] = useState<string | null>(null);
+  const [isExporting, setIsExporting] = useState(false);
+  const [reloadNonce, setReloadNonce] = useState(0);
+
+  const searchInputRef = useRef<HTMLInputElement | null>(null);
+  const toastTimerRef = useRef<number | null>(null);
+  const copyTimerRef = useRef<number | null>(null);
+
+  const showToast = useCallback((message: string) => {
+    setToastMessage(message);
+    if (toastTimerRef.current) {
+      window.clearTimeout(toastTimerRef.current);
+    }
+    toastTimerRef.current = window.setTimeout(() => {
+      setToastMessage(null);
+    }, 2600);
+  }, []);
+
+  // Load metadata once on startup
+  useEffect(() => {
+    let active = true;
+    fetch('/api/catalog/meta')
+      .then((res) => (res.ok ? res.json() : Promise.reject(new Error('Błąd odczytu metadanych'))))
+      .then((data: CatalogMetaResponse) => {
+        if (active) setMeta(data);
+      })
+      .catch(() => {
+        // Non-blocking; parts fetch surfaces real connectivity errors
+      });
+    return () => {
+      active = false;
+    };
+  }, []);
+
+  // Debounce text filters to avoid hammering Supabase on every keystroke
+  useEffect(() => {
+    const timer = window.setTimeout(() => {
+      setDebouncedGlobal(globalSearch);
+      setDebouncedColumnFilters(columnFilters);
+    }, 280);
+    return () => window.clearTimeout(timer);
+  }, [globalSearch, columnFilters]);
+
+  // Fetch paginated, filtered, sorted parts from server proxy
+  useEffect(() => {
+    const controller = new AbortController();
+    setLoading(true);
+    setError(null);
+
+    const qs = buildQueryString({
+      page,
+      pageSize,
+      sortBy,
+      sortDir,
+      globalSearch: debouncedGlobal,
+      truckSeries,
+      partGroup,
+      columnFilters: debouncedColumnFilters,
+    });
+
+    fetch(`/api/catalog/parts?${qs}`, { signal: controller.signal })
+      .then(async (res) => {
+        if (!res.ok) {
+          const body = await res.json().catch(() => ({}));
+          throw new Error(body.error || `Błąd serwera (${res.status})`);
+        }
+        return res.json() as Promise<CatalogPartsResponse>;
+      })
+      .then((data) => {
+        setItems(data.items);
+        setTotal(data.total);
+        setTotalIsEstimate(Boolean(data.totalIsEstimate));
+        setTotalPages(data.totalPages);
+        if (data.page !== page) {
+          setPage(data.page);
+        }
+        setLoading(false);
+      })
+      .catch((err: unknown) => {
+        if (err instanceof DOMException && err.name === 'AbortError') {
+          return;
+        }
+        setError(err instanceof Error ? err.message : 'Nie udało się pobrać rekordów katalogu.');
+        setLoading(false);
+      });
+
+    return () => controller.abort();
+  }, [
+    page,
+    pageSize,
+    sortBy,
+    sortDir,
+    debouncedGlobal,
+    truckSeries,
+    partGroup,
+    debouncedColumnFilters,
+    reloadNonce,
+  ]);
+
+  const hasActiveFilters = useMemo(() => {
+    if (globalSearch.trim()) return true;
+    if (truckSeries !== 'all' || partGroup !== 'all') return true;
+    return Object.values(columnFilters).some((v) => v.trim().length > 0);
+  }, [globalSearch, truckSeries, partGroup, columnFilters]);
+
+  const handleSort = useCallback(
+    (key: ColumnKey) => {
+      if (sortBy === key) {
+        setSortDir((prev) => (prev === 'asc' ? 'desc' : 'asc'));
+      } else {
+        setSortBy(key);
+        setSortDir('asc');
+      }
+      setPage(1);
+    },
+    [sortBy]
+  );
+
+  const handleColumnFilterChange = useCallback((key: ColumnKey, value: string) => {
+    setColumnFilters((prev) => ({ ...prev, [key]: value }));
+    setPage(1);
+  }, []);
+
+  const handleClearColumnFilter = useCallback((key: ColumnKey) => {
+    setColumnFilters((prev) => ({ ...prev, [key]: '' }));
+    setPage(1);
+  }, []);
+
+  const handleGlobalSearchChange = useCallback((value: string) => {
+    setGlobalSearch(value);
+    setPage(1);
+  }, []);
+
+  const handleSelectTruckSeries = useCallback((id: string) => {
+    setTruckSeries(id);
+    setPage(1);
+  }, []);
+
+  const handleSelectPartGroup = useCallback((id: string) => {
+    setPartGroup(id);
+    setPage(1);
+  }, []);
+
+  const handlePageSizeChange = useCallback((size: number) => {
+    setPageSize(size);
+    setPage(1);
+  }, []);
+
+  const handleResetAll = useCallback(() => {
+    setGlobalSearch('');
+    setTruckSeries('all');
+    setPartGroup('all');
+    setColumnFilters(EMPTY_COLUMN_FILTERS);
+    setDebouncedGlobal('');
+    setDebouncedColumnFilters(EMPTY_COLUMN_FILTERS);
+    setSortBy('lp');
+    setSortDir('asc');
+    setPage(1);
+  }, []);
+
+  const handleToggleColumn = useCallback((key: ColumnKey) => {
+    setVisibleColumns((prev) => ({ ...prev, [key]: !prev[key] }));
+  }, []);
+
+  const handleShowAllColumns = useCallback(() => {
+    setVisibleColumns(DEFAULT_VISIBLE_COLUMNS);
+  }, []);
+
+  const handleCopyPartNumber = useCallback(
+    async (code: string) => {
+      try {
+        if (navigator.clipboard && navigator.clipboard.writeText) {
+          await navigator.clipboard.writeText(code);
+        } else {
+          const textarea = document.createElement('textarea');
+          textarea.value = code;
+          textarea.style.position = 'fixed';
+          textarea.style.opacity = '0';
+          document.body.appendChild(textarea);
+          textarea.select();
+          document.execCommand('copy');
+          document.body.removeChild(textarea);
+        }
+        setCopiedCode(code);
+        showToast(`Skopiowano numer katalogowy: ${code}`);
+        if (copyTimerRef.current) {
+          window.clearTimeout(copyTimerRef.current);
+        }
+        copyTimerRef.current = window.setTimeout(() => {
+          setCopiedCode(null);
+        }, 1600);
+      } catch {
+        showToast('Nie udało się skopiować numeru do schowka.');
+      }
+    },
+    [showToast]
+  );
+
+  const handleExportCsv = useCallback(async () => {
+    setIsExporting(true);
+    try {
+      const qs = buildQueryString({
+        page: 1,
+        pageSize,
+        sortBy,
+        sortDir,
+        globalSearch,
+        truckSeries,
+        partGroup,
+        columnFilters,
+      });
+
+      const res = await fetch(`/api/catalog/export?${qs}`);
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body.error || 'Błąd generowania pliku CSV');
+      }
+
+      const rowCount = res.headers.get('X-Export-Row-Count');
+      const truncated = res.headers.get('X-Export-Truncated') === 'true';
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement('a');
+      const stamp = new Date().toISOString().slice(0, 10);
+      link.href = url;
+      link.download = `katalog_heli_${stamp}.csv`;
+      document.body.appendChild(link);
+      link.click();
+      document.body.removeChild(link);
+      URL.revokeObjectURL(url);
+
+      if (truncated && rowCount) {
+        showToast(
+          `Wyeksportowano pierwsze ${Number(rowCount).toLocaleString('pl-PL')} pasujących wierszy (limit pliku CSV).`
+        );
+      } else if (rowCount) {
+        showToast(`Zapisano plik CSV (${Number(rowCount).toLocaleString('pl-PL')} wierszy).`);
+      } else {
+        showToast('Zapisano przefiltrowane wyniki do pliku CSV.');
+      }
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : 'Nie udało się wyeksportować pliku CSV.';
+      showToast(msg);
+    } finally {
+      setIsExporting(false);
+    }
+  }, [pageSize, sortBy, sortDir, globalSearch, truckSeries, partGroup, columnFilters, showToast]);
+
+  const handleFocusCatalog = useCallback(() => {
+    setHelpOpen(false);
+    setColumnsMenuOpen(false);
+    searchInputRef.current?.focus();
+  }, []);
+
+  return (
+    <div className="min-h-screen flex flex-col bg-[#F8F9FA] text-[#0F172A]">
+      <TopBar
+        sidebarOpen={sidebarOpen}
+        onToggleSidebar={() => setSidebarOpen((prev) => !prev)}
+        onOpenColumns={() => setColumnsMenuOpen(true)}
+        onOpenHelp={() => setHelpOpen(true)}
+        onFocusCatalog={handleFocusCatalog}
+        onExportCsv={handleExportCsv}
+        isExporting={isExporting}
+      />
+
+      <div className="flex-1 flex min-h-0">
+        <CategorySidebar
+          open={sidebarOpen}
+          onCloseMobile={() => {
+            if (window.innerWidth < 1024) setSidebarOpen(false);
+          }}
+          truckSeries={truckSeries}
+          partGroup={partGroup}
+          onSelectTruckSeries={handleSelectTruckSeries}
+          onSelectPartGroup={handleSelectPartGroup}
+          meta={meta}
+          onOpenHelp={() => setHelpOpen(true)}
+        />
+
+        <main className="flex-1 min-w-0 flex flex-col h-[calc(100vh-3.5rem)]">
+          {/* Quiet informational banner only when running in demo preview before Secrets are configured */}
+          {meta?.mode === 'demo' && (
+            <div className="bg-[#FFFBEB] border-b border-[#FDE68A] px-4 lg:px-5 py-2 flex flex-wrap items-center justify-between gap-2 text-xs text-[#92400E]">
+              <div className="flex items-center gap-2 min-w-0">
+                <Info className="w-3.5 h-3.5 shrink-0 text-[#D97706]" aria-hidden="true" />
+                <span className="truncate">
+                  Tryb podglądu na zestawie przykładowym HELI — skonfiguruj{' '}
+                  <span className="font-mono font-medium">SUPABASE_URL</span> i{' '}
+                  <span className="font-mono font-medium">SUPABASE_ANON_KEY</span> w Secrets, aby
+                  podłączyć pełną tabelę <span className="font-mono font-medium">katalog_heli</span>{' '}
+                  (582 317 wierszy).
+                </span>
+              </div>
+              <button
+                type="button"
+                onClick={() => setHelpOpen(true)}
+                className="font-semibold text-[#92400E] hover:underline whitespace-nowrap shrink-0"
+              >
+                Szczegóły konfiguracji
+              </button>
+            </div>
+          )}
+
+          <CatalogToolbar
+            globalSearch={globalSearch}
+            onGlobalSearchChange={handleGlobalSearchChange}
+            truckSeries={truckSeries}
+            partGroup={partGroup}
+            onSelectTruckSeries={handleSelectTruckSeries}
+            onSelectPartGroup={handleSelectPartGroup}
+            columnFilters={columnFilters}
+            onClearColumnFilter={handleClearColumnFilter}
+            onResetAll={handleResetAll}
+            hasActiveFilters={hasActiveFilters}
+            total={total}
+            totalIsEstimate={totalIsEstimate}
+            page={page}
+            totalPages={totalPages}
+            sidebarOpen={sidebarOpen}
+            onToggleSidebar={() => setSidebarOpen((prev) => !prev)}
+            visibleColumns={visibleColumns}
+            onToggleColumn={handleToggleColumn}
+            onShowAllColumns={handleShowAllColumns}
+            columnsMenuOpen={columnsMenuOpen}
+            onSetColumnsMenuOpen={setColumnsMenuOpen}
+            searchInputRef={searchInputRef}
+          />
+
+          <CatalogTable
+            items={items}
+            loading={loading}
+            error={error}
+            onRetry={() => setReloadNonce((n) => n + 1)}
+            sortBy={sortBy}
+            sortDir={sortDir}
+            onSort={handleSort}
+            columnFilters={columnFilters}
+            onColumnFilterChange={handleColumnFilterChange}
+            visibleColumns={visibleColumns}
+            copiedCode={copiedCode}
+            onCopyPartNumber={handleCopyPartNumber}
+            onResetAll={handleResetAll}
+            hasActiveFilters={hasActiveFilters}
+          />
+
+          <PaginationBar
+            page={page}
+            pageSize={pageSize}
+            total={total}
+            totalPages={totalPages}
+            onPageChange={setPage}
+            onPageSizeChange={handlePageSizeChange}
+          />
+        </main>
+      </div>
+
+      <HelpModal open={helpOpen} onClose={() => setHelpOpen(false)} meta={meta} />
+
+      {/* Subtle transient feedback toast */}
+      {toastMessage && (
+        <div
+          role="status"
+          aria-live="polite"
+          className="fixed bottom-5 right-5 z-50 flex items-center gap-2 px-3.5 py-2.5 bg-[#0F172A] text-white text-xs font-medium rounded-md shadow-lg"
+        >
+          <CheckCircle2 className="w-4 h-4 text-[#22C55E] shrink-0" aria-hidden="true" />
+          <span>{toastMessage}</span>
+        </div>
+      )}
+    </div>
+  );
+}

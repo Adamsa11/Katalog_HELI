@@ -1,0 +1,6 @@
+{
+  "name": "Katalog Części HELI",
+  "description": "Przemysłowa przeglądarka katalogu części wózków widłowych HELI (katalog_heli) z sortowaniem, filtrowaniem po każdej kolumnie i kategoriach, kopiowaniem kodów i eksportem CSV.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
