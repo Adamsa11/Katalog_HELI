@@ -117,6 +117,7 @@ const COLUMN_CANDIDATES: Record<ColumnKey, string[]> = {
 let cachedClient: SupabaseClient | null = null;
 let cachedConfigKey = '';
 let cachedColumnMap: Record<ColumnKey, string> | null = null;
+let cachedNumericCols: ReadonlySet<ColumnKey> | null = null;
 let cachedColumnMapTime = 0;
 
 function normalizeHeader(value: string): string {
@@ -251,6 +252,7 @@ export function resetSupabaseCache(): void {
   cachedClient = null;
   cachedConfigKey = '';
   cachedColumnMap = null;
+  cachedNumericCols = null;
   cachedColumnMapTime = 0;
 }
 
@@ -276,11 +278,15 @@ function getSupabaseClient(): { client: SupabaseClient; tableName: string } | nu
   cachedClient = createScopedClient(config);
   cachedConfigKey = configKey;
   cachedColumnMap = null;
+  cachedNumericCols = null;
   cachedColumnMapTime = 0;
   return { client: cachedClient, tableName: config.tableName };
 }
 
-function inferColumnMapFromRow(sampleRow: Record<string, unknown>): Record<ColumnKey, string> {
+function inferColumnMapFromRow(sampleRow: Record<string, unknown>): {
+  colMap: Record<ColumnKey, string>;
+  numericCols: ReadonlySet<ColumnKey>;
+} {
   const actualKeys = Object.keys(sampleRow);
   const normalizedPairs = actualKeys.map((actual) => ({
     actual,
@@ -308,25 +314,39 @@ function inferColumnMapFromRow(sampleRow: Record<string, unknown>): Record<Colum
     }
   }
 
-  return resolved;
+  // Detect which mapped columns are actually numeric in PostgreSQL (vs text/varchar)
+  const detectedNumeric = new Set<ColumnKey>();
+  for (const key of NUMERIC_COLUMNS) {
+    const val = sampleRow[resolved[key]];
+    if (typeof val === 'number') {
+      detectedNumeric.add(key);
+    } else if (val === null || val === undefined) {
+      // Default to numeric for Lp/Ilość/Strona w PDF when first sample cell is null
+      detectedNumeric.add(key);
+    }
+    // If typeof val === 'string', keep it out of detectedNumeric so SQL ILIKE works directly!
+  }
+
+  return { colMap: resolved, numericCols: detectedNumeric };
 }
 
-async function resolveColumnMap(
+async function resolveSchema(
   client: SupabaseClient,
   tableName: string
-): Promise<Record<ColumnKey, string>> {
+): Promise<{ colMap: Record<ColumnKey, string>; numericCols: ReadonlySet<ColumnKey> }> {
   const now = Date.now();
-  if (cachedColumnMap && now - cachedColumnMapTime < 5 * 60 * 1000) {
-    return cachedColumnMap;
+  if (cachedColumnMap && cachedNumericCols && now - cachedColumnMapTime < 5 * 60 * 1000) {
+    return { colMap: cachedColumnMap, numericCols: cachedNumericCols };
   }
 
   const { data, error } = await client.from(tableName).select('*').limit(1);
   if (error || !data || data.length === 0) {
-    return DEFAULT_COLUMN_MAP;
+    return { colMap: DEFAULT_COLUMN_MAP, numericCols: NUMERIC_COLUMNS };
   }
 
   const inferred = inferColumnMapFromRow(data[0] as Record<string, unknown>);
-  cachedColumnMap = inferred;
+  cachedColumnMap = inferred.colMap;
+  cachedNumericCols = inferred.numericCols;
   cachedColumnMapTime = now;
   return inferred;
 }
@@ -373,7 +393,7 @@ export async function testSupabaseConnection(
       };
     }
 
-    const mappedColumns = inferColumnMapFromRow(rows[0]);
+    const { colMap: mappedColumns } = inferColumnMapFromRow(rows[0]);
     const detectedRawColumns = Object.keys(rows[0]);
 
     return {
@@ -396,13 +416,57 @@ export async function testSupabaseConnection(
   }
 }
 
-function sanitizePostgrestTerm(raw: string): string {
-  return raw
+/**
+ * Builds a safe SQL LIKE / ILIKE pattern:
+ * - Preserves SQL LIKE wildcards `%` (any sequence) and `_` (any single character),
+ *   and treats `*` as an alias for `%`.
+ * - If the user did not supply explicit wildcards (`%`, `_`, `*`), wraps the phrase
+ *   as `%phrase%` so standard substring matching works naturally like SQL `LIKE '%fraza%'`.
+ * - Strips PostgREST syntax delimiters (`,`, `(`, `)`, `"`) to prevent filter injection.
+ */
+function buildSqlLikePattern(raw: string, forPostgrestOr = false): string {
+  const cleaned = raw
     .trim()
     .slice(0, 120)
-    .replace(/[,()"*%\\%]/g, ' ')
+    .replace(/[,()"\\]/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
+
+  if (!cleaned) return '';
+
+  const normalizedWildcards = cleaned.replace(/\*/g, '%');
+  const hasExplicitWildcard = /[%_]/.test(normalizedWildcards);
+  const pattern = hasExplicitWildcard ? normalizedWildcards : `%${normalizedWildcards}%`;
+
+  // Inside PostgREST `.or(...)` expressions, `*` is the canonical wildcard for ILIKE
+  return forPostgrestOr ? pattern.replace(/%/g, '*') : pattern;
+}
+
+/**
+ * Evaluates a SQL LIKE / ILIKE pattern (case-insensitive) in JavaScript for Demo mode,
+ * matching PostgreSQL `ILIKE` semantics (`%` = zero or more chars, `_` = any single char).
+ */
+function matchesSqlLike(value: string, rawPattern: string): boolean {
+  const sqlPattern = buildSqlLikePattern(rawPattern, false);
+  if (!sqlPattern) return true;
+
+  let regexStr = '^';
+  for (const ch of sqlPattern) {
+    if (ch === '%') {
+      regexStr += '.*';
+    } else if (ch === '_') {
+      regexStr += '.';
+    } else {
+      regexStr += ch.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    }
+  }
+  regexStr += '$';
+
+  try {
+    return new RegExp(regexStr, 'is').test(value);
+  } catch {
+    return value.toLowerCase().includes(rawPattern.trim().toLowerCase());
+  }
 }
 
 function quotePostgrestCol(col: string): string {
@@ -413,6 +477,8 @@ function quotePostgrestCol(col: string): string {
 function parseNumericFilter(raw: string): ParsedNumericFilter | null {
   const cleaned = raw.trim().replace(/\s+/g, '');
   if (!cleaned) return null;
+  // If the user explicitly typed SQL LIKE wildcards (`%`, `_`, `*`), let LIKE handle it
+  if (/[%_*]/.test(cleaned)) return null;
 
   const rangeMatch = cleaned.match(/^(\d+(?:[.,]\d+)?)(?:-|–|\.\.)(\d+(?:[.,]\d+)?)$/);
   if (rangeMatch) {
@@ -473,28 +539,28 @@ function mapRawRow(row: Record<string, unknown>, colMap: Record<ColumnKey, strin
 
 function applyDemoFiltering(params: CatalogQueryParams): CatalogPart[] {
   const { globalSearch, truckSeries, partGroup, filters, sortBy, sortDir } = params;
-  const globalNorm = globalSearch.trim().toLowerCase();
+  const globalTrimmed = globalSearch.trim();
 
   const seriesObj = TRUCK_SERIES_CATEGORIES.find((c) => c.id === truckSeries);
   const groupObj = PART_GROUP_CATEGORIES.find((c) => c.id === partGroup);
 
   const filtered = DEMO_CATALOG.filter((item) => {
     if (seriesObj && seriesObj.keywords.length > 0) {
-      const modelUpper = item.modelWozka.toUpperCase();
       const matchesSeries = seriesObj.keywords.some((kw) =>
-        modelUpper.startsWith(kw.toUpperCase())
+        matchesSqlLike(item.modelWozka, `${kw}%`)
       );
       if (!matchesSeries) return false;
     }
 
     if (groupObj && groupObj.keywords.length > 0) {
-      const plLower = `${item.nazwaPl} ${item.uwagi}`.toLowerCase();
-      const matchesGroup = groupObj.keywords.some((kw) => plLower.includes(kw.toLowerCase()));
+      const matchesGroup = groupObj.keywords.some((kw) =>
+        matchesSqlLike(item.nazwaPl, `%${kw}%`)
+      );
       if (!matchesGroup) return false;
     }
 
-    if (globalNorm) {
-      const haystack = [
+    if (globalTrimmed) {
+      const searchFields = [
         String(item.lp),
         item.modelWozka,
         item.nrKatalogowy,
@@ -503,10 +569,10 @@ function applyDemoFiltering(params: CatalogQueryParams): CatalogPart[] {
         item.nazwaCn,
         item.uwagi,
         String(item.stronaPdf),
-      ]
-        .join(' ')
-        .toLowerCase();
-      if (!haystack.includes(globalNorm)) return false;
+      ];
+      if (!searchFields.some((field) => matchesSqlLike(field, globalTrimmed))) {
+        return false;
+      }
     }
 
     for (const key of ALLOWED_COLUMNS) {
@@ -526,11 +592,10 @@ function applyDemoFiltering(params: CatalogQueryParams): CatalogPart[] {
           if (parsed.kind === 'gt' && itemNum <= parsed.value!) return false;
           if (parsed.kind === 'lt' && itemNum >= parsed.value!) return false;
         } else {
-          if (!String(item[key]).toLowerCase().includes(rawFilter.toLowerCase())) return false;
+          if (!matchesSqlLike(String(item[key] ?? ''), rawFilter)) return false;
         }
       } else {
-        const cell = String(item[key] ?? '').toLowerCase();
-        if (!cell.includes(rawFilter.toLowerCase())) return false;
+        if (!matchesSqlLike(String(item[key] ?? ''), rawFilter)) return false;
       }
     }
 
@@ -555,16 +620,21 @@ function applyDemoFiltering(params: CatalogQueryParams): CatalogPart[] {
 }
 
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
-function applySupabaseFilters(query: any, params: CatalogQueryParams, colMap: Record<ColumnKey, string>) {
+function applySupabaseFilters(
+  query: any,
+  params: CatalogQueryParams,
+  colMap: Record<ColumnKey, string>,
+  numericCols: ReadonlySet<ColumnKey>
+) {
   let q = query;
 
   const seriesObj = TRUCK_SERIES_CATEGORIES.find((c) => c.id === params.truckSeries);
   if (seriesObj && seriesObj.keywords.length > 0) {
-    const seriesExprs = seriesObj.keywords
-      .map((kw) => sanitizePostgrestTerm(kw))
-      .filter(Boolean)
-      .map((kw) => `${quotePostgrestCol(colMap.modelWozka)}.ilike.${kw}%`);
-    if (seriesExprs.length > 0) {
+    if (seriesObj.keywords.length === 1) {
+      q = q.ilike(colMap.modelWozka, `${seriesObj.keywords[0]}%`);
+    } else {
+      const seriesExprs = seriesObj.keywords
+        .map((kw) => `${quotePostgrestCol(colMap.modelWozka)}.ilike.${kw}*`);
       q = q.or(seriesExprs.join(','));
     }
   }
@@ -572,16 +642,16 @@ function applySupabaseFilters(query: any, params: CatalogQueryParams, colMap: Re
   const groupObj = PART_GROUP_CATEGORIES.find((c) => c.id === params.partGroup);
   if (groupObj && groupObj.keywords.length > 0) {
     const groupExprs = groupObj.keywords
-      .map((kw) => sanitizePostgrestTerm(kw))
+      .map((kw) => buildSqlLikePattern(kw, true))
       .filter(Boolean)
-      .map((kw) => `${quotePostgrestCol(colMap.nazwaPl)}.ilike.%${kw}%`);
+      .map((pattern) => `${quotePostgrestCol(colMap.nazwaPl)}.ilike.${pattern}`);
     if (groupExprs.length > 0) {
       q = q.or(groupExprs.join(','));
     }
   }
 
-  const cleanGlobal = sanitizePostgrestTerm(params.globalSearch);
-  if (cleanGlobal) {
+  const globalOrPattern = buildSqlLikePattern(params.globalSearch, true);
+  if (globalOrPattern) {
     const searchCols: ColumnKey[] = [
       'modelWozka',
       'nrKatalogowy',
@@ -591,7 +661,7 @@ function applySupabaseFilters(query: any, params: CatalogQueryParams, colMap: Re
       'uwagi',
     ];
     const orClauses = searchCols.map(
-      (colKey) => `${quotePostgrestCol(colMap[colKey])}.ilike.%${cleanGlobal}%`
+      (colKey) => `${quotePostgrestCol(colMap[colKey])}.ilike.${globalOrPattern}`
     );
     q = q.or(orClauses.join(','));
   }
@@ -601,7 +671,9 @@ function applySupabaseFilters(query: any, params: CatalogQueryParams, colMap: Re
     if (!rawFilter) continue;
 
     const dbCol = colMap[key];
-    if (NUMERIC_COLUMNS.has(key)) {
+    const isNumericDbCol = numericCols.has(key);
+
+    if (isNumericDbCol) {
       const parsed = parseNumericFilter(rawFilter);
       if (parsed) {
         if (parsed.kind === 'exact') q = q.eq(dbCol, parsed.value);
@@ -612,11 +684,19 @@ function applySupabaseFilters(query: any, params: CatalogQueryParams, colMap: Re
         else if (parsed.kind === 'lt') q = q.lt(dbCol, parsed.value);
         continue;
       }
+      // If user typed a SQL LIKE pattern (e.g. `12%`) on an integer/numeric PostgreSQL column,
+      // extract digits fallback or skip invalid text ilike on integer to prevent Postgres type error
+      const digitsOnly = rawFilter.replace(/[^\d]/g, '');
+      if (digitsOnly) {
+        q = q.eq(dbCol, Number(digitsOnly));
+      }
+      continue;
     }
 
-    const sanitized = sanitizePostgrestTerm(rawFilter);
-    if (sanitized) {
-      q = q.ilike(dbCol, `%${sanitized}%`);
+    // For all text columns (and numeric columns stored as text in Supabase), use true SQL ILIKE!
+    const likePattern = buildSqlLikePattern(rawFilter, false);
+    if (likePattern) {
+      q = q.ilike(dbCol, likePattern);
     }
   }
 
@@ -637,7 +717,7 @@ export async function getCatalogMeta(): Promise<CatalogMetaResponse> {
     };
   }
 
-  const colMap = await resolveColumnMap(conn.client, conn.tableName);
+  const { colMap } = await resolveSchema(conn.client, conn.tableName);
   let totalEstimate = 0;
 
   const { count, error } = await conn.client
@@ -678,7 +758,7 @@ export async function queryCatalogParts(params: CatalogQueryParams): Promise<Cat
     };
   }
 
-  const colMap = await resolveColumnMap(conn.client, conn.tableName);
+  const { colMap, numericCols } = await resolveSchema(conn.client, conn.tableName);
   const sortCol = colMap[params.sortBy];
   const from = (params.page - 1) * params.pageSize;
   const to = from + params.pageSize - 1;
@@ -692,7 +772,7 @@ export async function queryCatalogParts(params: CatalogQueryParams): Promise<Cat
   const countMode = hasActiveFilters ? 'exact' : 'estimated';
 
   let query = conn.client.from(conn.tableName).select('*', { count: countMode });
-  query = applySupabaseFilters(query, params, colMap);
+  query = applySupabaseFilters(query, params, colMap, numericCols);
   query = query.order(sortCol, { ascending: params.sortDir === 'asc', nullsFirst: false });
   query = query.range(from, to);
 
@@ -701,7 +781,7 @@ export async function queryCatalogParts(params: CatalogQueryParams): Promise<Cat
 
   if (error && countMode === 'exact') {
     let retryQuery = conn.client.from(conn.tableName).select('*', { count: 'estimated' });
-    retryQuery = applySupabaseFilters(retryQuery, params, colMap);
+    retryQuery = applySupabaseFilters(retryQuery, params, colMap, numericCols);
     retryQuery = retryQuery.order(sortCol, {
       ascending: params.sortDir === 'asc',
       nullsFirst: false,
@@ -758,14 +838,14 @@ export async function exportCatalogCsv(
     truncated = allFiltered.length > MAX_EXPORT_ROWS;
     items = allFiltered.slice(0, MAX_EXPORT_ROWS);
   } else {
-    const colMap = await resolveColumnMap(conn.client, conn.tableName);
+    const { colMap, numericCols } = await resolveSchema(conn.client, conn.tableName);
     const sortCol = colMap[params.sortBy];
     const batchSize = 1000;
     let offset = 0;
 
     while (items.length < MAX_EXPORT_ROWS) {
       let query = conn.client.from(conn.tableName).select('*');
-      query = applySupabaseFilters(query, params, colMap);
+      query = applySupabaseFilters(query, params, colMap, numericCols);
       query = query.order(sortCol, { ascending: params.sortDir === 'asc', nullsFirst: false });
       query = query.range(offset, offset + batchSize - 1);
 

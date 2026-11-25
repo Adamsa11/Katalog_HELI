@@ -49,30 +49,39 @@ export function HelpModal({ open, onClose, meta }: HelpModalProps) {
         <div className="p-5 space-y-5 max-h-[75vh] overflow-y-auto text-[13px] text-[#334155] leading-relaxed">
           <section className="space-y-2">
             <h3 className="font-display text-sm font-semibold text-[#0F172A]">
-              1. Filtry kolumnowe i zakresy liczbowe
+              1. Filtrowanie w stylu SQL LIKE oraz zakresy liczbowe
             </h3>
             <p>
-              Nad każdą z 9 kolumn znajduje się dedykowane pole filtra. Kolumny tekstowe wyszukują
-              dowolny fragment (bez rozróżniania wielkości liter), natomiast kolumny liczbowe (
-              <span className="font-mono text-[#0F172A]">Lp</span>,{' '}
-              <span className="font-mono text-[#0F172A]">Ilość</span>,{' '}
-              <span className="font-mono text-[#0F172A]">Strona w PDF</span>) obsługują dodatkowo
-              operatory zakresów:
+              Wyszukiwarka i filtry kolumnowe działają jak operator{' '}
+              <span className="font-mono text-[#0F172A]">SQL ILIKE</span> (bez rozróżniania
+              wielkości liter). Wpisanie zwykłej frazy wyszukuje ją w dowolnym miejscu (jak{' '}
+              <span className="font-mono text-[#0F172A]">%fraza%</span>), a użycie znaków
+              wieloznacznych <span className="font-mono text-[#0F172A]">%</span> (dowolny ciąg) lub{' '}
+              <span className="font-mono text-[#0F172A]">_</span> (dokładnie jeden znak) stosuje
+              dokładny wzorzec SQL LIKE:
             </p>
             <div className="grid grid-cols-1 sm:grid-cols-3 gap-2 pt-1 text-xs">
               <div className="p-2.5 bg-[#F8F9FA] border border-[#E2E8F0] rounded">
-                <div className="font-mono font-semibold text-[#0F172A]">100-500</div>
-                <div className="text-[#64748B] mt-0.5">Zakres od 100 do 500</div>
+                <div className="font-mono font-semibold text-[#0F172A]">CBD%</div>
+                <div className="text-[#64748B] mt-0.5">Zaczyna się od „CBD”</div>
               </div>
               <div className="p-2.5 bg-[#F8F9FA] border border-[#E2E8F0] rounded">
-                <div className="font-mono font-semibold text-[#0F172A]">&gt;=4</div>
-                <div className="text-[#64748B] mt-0.5">Wartość większa lub równa 4</div>
+                <div className="font-mono font-semibold text-[#0F172A]">%siłownik%podn%</div>
+                <div className="text-[#64748B] mt-0.5">Zawiera oba fragmenty w kolejności</div>
               </div>
               <div className="p-2.5 bg-[#F8F9FA] border border-[#E2E8F0] rounded">
-                <div className="font-mono font-semibold text-[#0F172A]">42</div>
-                <div className="text-[#64748B] mt-0.5">Dokładne dopasowanie liczby</div>
+                <div className="font-mono font-semibold text-[#0F172A]">Z-320__</div>
+                <div className="text-[#64748B] mt-0.5">„Z-320” + dokładnie 2 znaki</div>
               </div>
             </div>
+            <p className="pt-1">
+              Kolumny liczbowe (<span className="font-mono text-[#0F172A]">Lp</span>,{' '}
+              <span className="font-mono text-[#0F172A]">Ilość</span>,{' '}
+              <span className="font-mono text-[#0F172A]">Strona w PDF</span>) obsługują dodatkowo
+              zakresy (<span className="font-mono text-[#0F172A]">100-500</span>), porównania (
+              <span className="font-mono text-[#0F172A]">&gt;=4</span>,{' '}
+              <span className="font-mono text-[#0F172A]">&lt;=20</span>) oraz dokładne wartości.
+            </p>
           </section>
 
           <section className="space-y-2 border-t border-[#E2E8F0] pt-4">

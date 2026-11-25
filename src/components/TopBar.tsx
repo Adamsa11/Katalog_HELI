@@ -23,19 +23,19 @@ export function TopBar({
 }: TopBarProps) {
   return (
     <header className="sticky top-0 z-30 h-14 bg-white border-b border-[#E2E8F0] px-4 lg:px-6 flex items-center justify-between gap-8">
-      {/* Zone 1: Single-line Brand Wordmark */}
+      {/* Zone 1: Brand Logo */}
       <button
         type="button"
         onClick={onFocusCatalog}
-        className="font-display text-base font-bold tracking-tight text-[#0F172A] whitespace-nowrap shrink-0 flex items-center gap-2.5 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#D61F26] rounded"
+        aria-label="Sawtrak Serwis — Katalog Części HELI"
+        className="whitespace-nowrap shrink-0 flex items-center focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#D61F26] rounded"
       >
-        <span
-          aria-hidden="true"
-          className="inline-flex h-6 w-6 items-center justify-center rounded bg-[#D61F26] text-white font-display text-xs font-bold tracking-normal"
-        >
-          H
-        </span>
-        <span>Katalog Części HELI</span>
+        <img
+          src={`${import.meta.env.BASE_URL}assets/aistudio/Logo_sawtrak_serwis_6ef8688b.jpeg`}
+          alt="Sawtrak Serwis"
+          referrerPolicy="no-referrer"
+          className="h-10 w-[152px] object-cover object-[50%_20%] block"
+        />
       </button>
 
       {/* Zone 2: Clean single-line text navigation links */}

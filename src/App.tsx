@@ -1,4 +1,4 @@
-import { CheckCircle2, Info } from 'lucide-react';
+import { CheckCircle2 } from 'lucide-react';
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { CatalogTable } from './components/CatalogTable';
 import { CatalogToolbar } from './components/CatalogToolbar';
@@ -332,27 +332,6 @@ export default function App() {
         />
 
         <main className="flex-1 min-w-0 flex flex-col h-[calc(100vh-3.5rem)]">
-          {/* Quiet informational banner when running in demo preview before Supabase is configured */}
-          {meta?.mode === 'demo' && (
-            <div className="bg-[#FFFBEB] border-b border-[#FDE68A] px-4 lg:px-5 py-2 flex flex-wrap items-center justify-between gap-2 text-xs text-[#92400E]">
-              <div className="flex items-center gap-2 min-w-0">
-                <Info className="w-3.5 h-3.5 shrink-0 text-[#D97706]" aria-hidden="true" />
-                <span className="truncate">
-                  Tryb podglądu na zestawie przykładowym HELI — zapisz adres i klucz publiczny
-                  Supabase, aby podłączyć tabelę{' '}
-                  <span className="font-mono font-medium">katalog_heli</span> (582 317 wierszy).
-                </span>
-              </div>
-              <button
-                type="button"
-                onClick={() => setConfigOpen(true)}
-                className="font-semibold text-[#92400E] hover:underline whitespace-nowrap shrink-0"
-              >
-                Otwórz konfigurację
-              </button>
-            </div>
-          )}
-
           <CatalogToolbar
             globalSearch={globalSearch}
             onGlobalSearchChange={handleGlobalSearchChange}
