@@ -2,7 +2,7 @@ name: Deploy Katalog HELI to GitHub Pages
 
 on:
   push:
-    branches: ['main']
+    branches: ['main', 'master']
   workflow_dispatch:
 
 permissions:
@@ -24,14 +24,17 @@ jobs:
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
+
+      - name: Setup GitHub Pages
+        uses: actions/configure-pages@v5
 
       - name: Install dependencies
         run: |
           if [ -f package-lock.json ]; then
-            npm ci
+            npm ci --no-audit --no-fund --legacy-peer-deps
           else
-            npm install
+            npm install --no-audit --no-fund --legacy-peer-deps
           fi
 
       - name: Build static site
@@ -40,6 +43,11 @@ jobs:
           VITE_SUPABASE_ANON_KEY: ${{ vars.VITE_SUPABASE_ANON_KEY }}
           VITE_SUPABASE_TABLE_NAME: ${{ vars.VITE_SUPABASE_TABLE_NAME || 'katalog_heli' }}
         run: npm run build
+
+      - name: Ensure SPA 404 fallback and .nojekyll
+        run: |
+          cp dist/index.html dist/404.html
+          touch dist/.nojekyll
 
       - name: Upload Pages artifact
         uses: actions/upload-pages-artifact@v3
