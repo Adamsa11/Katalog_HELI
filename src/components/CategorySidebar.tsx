@@ -13,7 +13,7 @@ interface CategorySidebarProps {
   onSelectTruckSeries: (id: string) => void;
   onSelectPartGroup: (id: string) => void;
   meta: CatalogMetaResponse | null;
-  onOpenHelp: () => void;
+  onOpenConfig: () => void;
 }
 
 export function CategorySidebar({
@@ -24,7 +24,7 @@ export function CategorySidebar({
   onSelectTruckSeries,
   onSelectPartGroup,
   meta,
-  onOpenHelp,
+  onOpenConfig,
 }: CategorySidebarProps) {
   if (!open) return null;
 
@@ -155,10 +155,13 @@ export function CategorySidebar({
         </div>
         <button
           type="button"
-          onClick={onOpenHelp}
+          onClick={() => {
+            onCloseMobile();
+            onOpenConfig();
+          }}
           className="text-xs font-medium text-[#D61F26] hover:text-[#B91C1C] hover:underline underline-offset-2 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#D61F26] rounded"
         >
-          {meta?.mode === 'supabase' ? 'Mapowanie kolumn i eksport' : 'Jak podpiąć bazę Supabase'}
+          {meta?.mode === 'supabase' ? 'Zmień konfigurację Supabase' : 'Skonfiguruj Supabase'}
         </button>
       </div>
     </div>

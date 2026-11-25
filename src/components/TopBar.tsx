@@ -4,6 +4,7 @@ interface TopBarProps {
   sidebarOpen: boolean;
   onToggleSidebar: () => void;
   onOpenColumns: () => void;
+  onOpenConfig: () => void;
   onOpenHelp: () => void;
   onFocusCatalog: () => void;
   onExportCsv: () => void;
@@ -14,6 +15,7 @@ export function TopBar({
   sidebarOpen,
   onToggleSidebar,
   onOpenColumns,
+  onOpenConfig,
   onOpenHelp,
   onFocusCatalog,
   onExportCsv,
@@ -64,6 +66,13 @@ export function TopBar({
           className="hover:text-[#0F172A] hover:underline underline-offset-4 decoration-[#D61F26] transition-colors whitespace-nowrap shrink-0 py-1 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#D61F26] rounded"
         >
           Kolumny
+        </button>
+        <button
+          type="button"
+          onClick={onOpenConfig}
+          className="hover:text-[#0F172A] hover:underline underline-offset-4 decoration-[#D61F26] transition-colors whitespace-nowrap shrink-0 py-1 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#D61F26] rounded"
+        >
+          Konfiguracja
         </button>
         <button
           type="button"

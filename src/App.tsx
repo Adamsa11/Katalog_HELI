@@ -5,13 +5,18 @@ import { CatalogToolbar } from './components/CatalogToolbar';
 import { CategorySidebar } from './components/CategorySidebar';
 import { HelpModal } from './components/HelpModal';
 import { PaginationBar } from './components/PaginationBar';
+import { SupabaseConfigModal } from './components/SupabaseConfigModal';
 import { TopBar } from './components/TopBar';
+import {
+  exportCatalogCsv,
+  getCatalogMeta,
+  queryCatalogParts,
+} from './services/catalogService';
 import {
   CATALOG_COLUMNS,
   EMPTY_COLUMN_FILTERS,
   type CatalogMetaResponse,
   type CatalogPart,
-  type CatalogPartsResponse,
   type ColumnFilters,
   type ColumnKey,
   type SortDirection,
@@ -24,42 +29,6 @@ const DEFAULT_VISIBLE_COLUMNS: Record<ColumnKey, boolean> = CATALOG_COLUMNS.redu
   },
   {} as Record<ColumnKey, boolean>
 );
-
-function buildQueryString(params: {
-  page: number;
-  pageSize: number;
-  sortBy: ColumnKey;
-  sortDir: SortDirection;
-  globalSearch: string;
-  truckSeries: string;
-  partGroup: string;
-  columnFilters: ColumnFilters;
-}): string {
-  const qs = new URLSearchParams();
-  qs.set('page', String(params.page));
-  qs.set('pageSize', String(params.pageSize));
-  qs.set('sortBy', params.sortBy);
-  qs.set('sortDir', params.sortDir);
-
-  if (params.globalSearch.trim()) {
-    qs.set('globalSearch', params.globalSearch.trim());
-  }
-  if (params.truckSeries !== 'all') {
-    qs.set('truckSeries', params.truckSeries);
-  }
-  if (params.partGroup !== 'all') {
-    qs.set('partGroup', params.partGroup);
-  }
-
-  for (const col of CATALOG_COLUMNS) {
-    const val = params.columnFilters[col.key]?.trim();
-    if (val) {
-      qs.set(`f_${col.key}`, val);
-    }
-  }
-
-  return qs.toString();
-}
 
 export default function App() {
   const [meta, setMeta] = useState<CatalogMetaResponse | null>(null);
@@ -80,7 +49,7 @@ export default function App() {
   const [partGroup, setPartGroup] = useState('all');
   const [columnFilters, setColumnFilters] = useState<ColumnFilters>(EMPTY_COLUMN_FILTERS);
 
-  // Debounced query mirrors for text inputs (300ms)
+  // Debounced query mirrors for text inputs (280ms)
   const [debouncedGlobal, setDebouncedGlobal] = useState('');
   const [debouncedColumnFilters, setDebouncedColumnFilters] =
     useState<ColumnFilters>(EMPTY_COLUMN_FILTERS);
@@ -89,6 +58,7 @@ export default function App() {
   const [visibleColumns, setVisibleColumns] =
     useState<Record<ColumnKey, boolean>>(DEFAULT_VISIBLE_COLUMNS);
   const [columnsMenuOpen, setColumnsMenuOpen] = useState(false);
+  const [configOpen, setConfigOpen] = useState(false);
   const [helpOpen, setHelpOpen] = useState(false);
 
   const [copiedCode, setCopiedCode] = useState<string | null>(null);
@@ -99,6 +69,7 @@ export default function App() {
   const searchInputRef = useRef<HTMLInputElement | null>(null);
   const toastTimerRef = useRef<number | null>(null);
   const copyTimerRef = useRef<number | null>(null);
+  const activeRequestIdRef = useRef(0);
 
   const showToast = useCallback((message: string) => {
     setToastMessage(message);
@@ -107,24 +78,23 @@ export default function App() {
     }
     toastTimerRef.current = window.setTimeout(() => {
       setToastMessage(null);
-    }, 2600);
+    }, 2800);
   }, []);
 
-  // Load metadata once on startup
+  // Load metadata on startup and whenever configuration changes
   useEffect(() => {
     let active = true;
-    fetch('/api/catalog/meta')
-      .then((res) => (res.ok ? res.json() : Promise.reject(new Error('Błąd odczytu metadanych'))))
-      .then((data: CatalogMetaResponse) => {
+    getCatalogMeta()
+      .then((data) => {
         if (active) setMeta(data);
       })
       .catch(() => {
-        // Non-blocking; parts fetch surfaces real connectivity errors
+        // Parts query surfaces connectivity errors clearly
       });
     return () => {
       active = false;
     };
-  }, []);
+  }, [reloadNonce]);
 
   // Debounce text filters to avoid hammering Supabase on every keystroke
   useEffect(() => {
@@ -135,13 +105,13 @@ export default function App() {
     return () => window.clearTimeout(timer);
   }, [globalSearch, columnFilters]);
 
-  // Fetch paginated, filtered, sorted parts from server proxy
+  // Fetch paginated, filtered, sorted parts directly via client-side catalog service
   useEffect(() => {
-    const controller = new AbortController();
+    const requestId = ++activeRequestIdRef.current;
     setLoading(true);
     setError(null);
 
-    const qs = buildQueryString({
+    queryCatalogParts({
       page,
       pageSize,
       sortBy,
@@ -149,18 +119,10 @@ export default function App() {
       globalSearch: debouncedGlobal,
       truckSeries,
       partGroup,
-      columnFilters: debouncedColumnFilters,
-    });
-
-    fetch(`/api/catalog/parts?${qs}`, { signal: controller.signal })
-      .then(async (res) => {
-        if (!res.ok) {
-          const body = await res.json().catch(() => ({}));
-          throw new Error(body.error || `Błąd serwera (${res.status})`);
-        }
-        return res.json() as Promise<CatalogPartsResponse>;
-      })
+      filters: debouncedColumnFilters,
+    })
       .then((data) => {
+        if (activeRequestIdRef.current !== requestId) return;
         setItems(data.items);
         setTotal(data.total);
         setTotalIsEstimate(Boolean(data.totalIsEstimate));
@@ -171,14 +133,10 @@ export default function App() {
         setLoading(false);
       })
       .catch((err: unknown) => {
-        if (err instanceof DOMException && err.name === 'AbortError') {
-          return;
-        }
+        if (activeRequestIdRef.current !== requestId) return;
         setError(err instanceof Error ? err.message : 'Nie udało się pobrać rekordów katalogu.');
         setLoading(false);
       });
-
-    return () => controller.abort();
   }, [
     page,
     pageSize,
@@ -293,7 +251,7 @@ export default function App() {
   const handleExportCsv = useCallback(async () => {
     setIsExporting(true);
     try {
-      const qs = buildQueryString({
+      const { csv, rowCount, truncated } = await exportCatalogCsv({
         page: 1,
         pageSize,
         sortBy,
@@ -301,18 +259,10 @@ export default function App() {
         globalSearch,
         truckSeries,
         partGroup,
-        columnFilters,
+        filters: columnFilters,
       });
 
-      const res = await fetch(`/api/catalog/export?${qs}`);
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({}));
-        throw new Error(body.error || 'Błąd generowania pliku CSV');
-      }
-
-      const rowCount = res.headers.get('X-Export-Row-Count');
-      const truncated = res.headers.get('X-Export-Truncated') === 'true';
-      const blob = await res.blob();
+      const blob = new Blob([csv], { type: 'text/csv;charset=utf-8;' });
       const url = URL.createObjectURL(blob);
       const link = document.createElement('a');
       const stamp = new Date().toISOString().slice(0, 10);
@@ -323,14 +273,12 @@ export default function App() {
       document.body.removeChild(link);
       URL.revokeObjectURL(url);
 
-      if (truncated && rowCount) {
+      if (truncated) {
         showToast(
-          `Wyeksportowano pierwsze ${Number(rowCount).toLocaleString('pl-PL')} pasujących wierszy (limit pliku CSV).`
+          `Wyeksportowano pierwsze ${rowCount.toLocaleString('pl-PL')} pasujących wierszy (limit pliku CSV).`
         );
-      } else if (rowCount) {
-        showToast(`Zapisano plik CSV (${Number(rowCount).toLocaleString('pl-PL')} wierszy).`);
       } else {
-        showToast('Zapisano przefiltrowane wyniki do pliku CSV.');
+        showToast(`Zapisano plik CSV (${rowCount.toLocaleString('pl-PL')} wierszy).`);
       }
     } catch (err: unknown) {
       const msg = err instanceof Error ? err.message : 'Nie udało się wyeksportować pliku CSV.';
@@ -340,8 +288,18 @@ export default function App() {
     }
   }, [pageSize, sortBy, sortDir, globalSearch, truckSeries, partGroup, columnFilters, showToast]);
 
+  const handleConfigChanged = useCallback(
+    (message: string) => {
+      setPage(1);
+      setReloadNonce((n) => n + 1);
+      showToast(message);
+    },
+    [showToast]
+  );
+
   const handleFocusCatalog = useCallback(() => {
     setHelpOpen(false);
+    setConfigOpen(false);
     setColumnsMenuOpen(false);
     searchInputRef.current?.focus();
   }, []);
@@ -352,6 +310,7 @@ export default function App() {
         sidebarOpen={sidebarOpen}
         onToggleSidebar={() => setSidebarOpen((prev) => !prev)}
         onOpenColumns={() => setColumnsMenuOpen(true)}
+        onOpenConfig={() => setConfigOpen(true)}
         onOpenHelp={() => setHelpOpen(true)}
         onFocusCatalog={handleFocusCatalog}
         onExportCsv={handleExportCsv}
@@ -369,29 +328,27 @@ export default function App() {
           onSelectTruckSeries={handleSelectTruckSeries}
           onSelectPartGroup={handleSelectPartGroup}
           meta={meta}
-          onOpenHelp={() => setHelpOpen(true)}
+          onOpenConfig={() => setConfigOpen(true)}
         />
 
         <main className="flex-1 min-w-0 flex flex-col h-[calc(100vh-3.5rem)]">
-          {/* Quiet informational banner only when running in demo preview before Secrets are configured */}
+          {/* Quiet informational banner when running in demo preview before Supabase is configured */}
           {meta?.mode === 'demo' && (
             <div className="bg-[#FFFBEB] border-b border-[#FDE68A] px-4 lg:px-5 py-2 flex flex-wrap items-center justify-between gap-2 text-xs text-[#92400E]">
               <div className="flex items-center gap-2 min-w-0">
                 <Info className="w-3.5 h-3.5 shrink-0 text-[#D97706]" aria-hidden="true" />
                 <span className="truncate">
-                  Tryb podglądu na zestawie przykładowym HELI — skonfiguruj{' '}
-                  <span className="font-mono font-medium">SUPABASE_URL</span> i{' '}
-                  <span className="font-mono font-medium">SUPABASE_ANON_KEY</span> w Secrets, aby
-                  podłączyć pełną tabelę <span className="font-mono font-medium">katalog_heli</span>{' '}
-                  (582 317 wierszy).
+                  Tryb podglądu na zestawie przykładowym HELI — zapisz adres i klucz publiczny
+                  Supabase, aby podłączyć tabelę{' '}
+                  <span className="font-mono font-medium">katalog_heli</span> (582 317 wierszy).
                 </span>
               </div>
               <button
                 type="button"
-                onClick={() => setHelpOpen(true)}
+                onClick={() => setConfigOpen(true)}
                 className="font-semibold text-[#92400E] hover:underline whitespace-nowrap shrink-0"
               >
-                Szczegóły konfiguracji
+                Otwórz konfigurację
               </button>
             </div>
           )}
@@ -448,6 +405,12 @@ export default function App() {
           />
         </main>
       </div>
+
+      <SupabaseConfigModal
+        open={configOpen}
+        onClose={() => setConfigOpen(false)}
+        onConfigChanged={handleConfigChanged}
+      />
 
       <HelpModal open={helpOpen} onClose={() => setHelpOpen(false)} meta={meta} />
 

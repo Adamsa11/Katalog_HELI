@@ -93,21 +93,33 @@ export function HelpModal({ open, onClose, meta }: HelpModalProps) {
 
           <section className="space-y-2 border-t border-[#E2E8F0] pt-4">
             <h3 className="font-display text-sm font-semibold text-[#0F172A]">
-              3. Podłączenie tabeli <span className="font-mono">katalog_heli</span> w Supabase
+              3. Publikacja na GitHub Pages i połączenie z Supabase
             </h3>
             <p>
-              Poświadczenia bazy przechowywane są wyłącznie po stronie serwera. Aby podpiąć swoją
-              bazę z 582 317 rekordami, dodaj w panelu <strong className="text-[#0F172A]">Secrets</strong>{' '}
-              następujące zmienne środowiskowe:
+              Aplikacja działa w pełni statycznie w przeglądarce i zawiera gotowy workflow{' '}
+              <span className="font-mono text-[#0F172A]">.github/workflows/deploy-pages.yml</span>.
+              Dane do tabeli <span className="font-mono text-[#0F172A]">katalog_heli</span> możesz
+              podać na dwa sposoby:
             </p>
+            <ul className="list-disc pl-5 space-y-1">
+              <li>
+                Bezpośrednio w aplikacji przez przycisk{' '}
+                <strong className="text-[#0F172A]">Konfiguracja</strong> w górnym panelu (dane
+                zapisują się lokalnie w przeglądarce).
+              </li>
+              <li>
+                Automatycznie podczas budowania na GitHub Pages — ustawiając zmienne repozytorium
+                (Settings → Secrets and variables → Actions → Variables):
+              </li>
+            </ul>
             <div className="p-3 bg-[#F8F9FA] border border-[#E2E8F0] rounded font-mono text-xs text-[#0F172A] space-y-1">
-              <div>SUPABASE_URL=https://twoj-projekt.supabase.co</div>
-              <div>SUPABASE_ANON_KEY=twoj-klucz-anon-lub-service-role</div>
-              <div>SUPABASE_TABLE_NAME=katalog_heli</div>
+              <div>VITE_SUPABASE_URL=https://twoj-projekt.supabase.co</div>
+              <div>VITE_SUPABASE_ANON_KEY=publiczny-klucz-anon</div>
+              <div>VITE_SUPABASE_TABLE_NAME=katalog_heli</div>
             </div>
             <p className="text-xs text-[#64748B]">
-              Serwer automatycznie rozpoznaje zarówno polskie nazwy kolumn ze spacjami, jak i nazwy
-              w formacie snake_case. Aktualnie aktywne mapowanie kolumn:
+              Aplikacja automatycznie rozpoznaje polskie nazwy kolumn ze spacjami oraz format
+              snake_case. Aktualnie aktywne mapowanie kolumn:
             </p>
 
             {meta && (

@@ -1,9 +1,9 @@
-import type { CatalogPart } from '../src/types/catalog.ts';
+import type { CatalogPart } from '../types/catalog';
 
 /**
  * Realistyczny zestaw demonstracyjny części katalogu HELI (wzorowany na strukturze
- * tabeli katalog_heli: 1 – 582 317) używany wyłącznie do czasu skonfigurowania
- * zmiennych środowiskowych SUPABASE_URL i SUPABASE_ANON_KEY po stronie serwera.
+ * tabeli katalog_heli: 1 – 582 317) używany domyślnie do czasu zapisania konfiguracji
+ * Supabase w panelu górnym lub podania zmiennych VITE_SUPABASE_*.
  */
 const BASE_PARTS: CatalogPart[] = [
   {
@@ -580,8 +580,6 @@ const BASE_PARTS: CatalogPart[] = [
   },
 ];
 
-// Rozszerzenie zbioru demo o dodatkowe spójne warianty modeli HELI (~150 pozycji)
-// dla płynnego testowania paginacji (50 / 100 / 250) i filtrów kolumnowych.
 const VARIANT_MODELS = [
   { model: 'CBD15-170J', prefix: 'T15J', lpOffset: 10000 },
   { model: 'CBD20-C2LIH', prefix: 'T2GW2', lpOffset: 120000 },
@@ -722,7 +720,7 @@ const VARIANT_TEMPLATES: Array<Omit<CatalogPart, 'lp' | 'modelWozka' | 'nrKatalo
   },
 ];
 
-export function buildDemoCatalog(): CatalogPart[] {
+function buildDemoCatalog(): CatalogPart[] {
   const generated: CatalogPart[] = [];
   VARIANT_MODELS.forEach((variant, vIdx) => {
     VARIANT_TEMPLATES.forEach((tpl, tIdx) => {

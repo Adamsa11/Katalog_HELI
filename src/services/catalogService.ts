@@ -1,4 +1,5 @@
 import { createClient, type SupabaseClient } from '@supabase/supabase-js';
+import { DEMO_CATALOG } from '../data/demoData';
 import {
   PART_GROUP_CATEGORIES,
   TRUCK_SERIES_CATEGORIES,
@@ -8,8 +9,7 @@ import {
   type ColumnFilters,
   type ColumnKey,
   type SortDirection,
-} from '../src/types/catalog.ts';
-import { DEMO_CATALOG } from './demoData.ts';
+} from '../types/catalog';
 
 export const ALLOWED_COLUMNS: ReadonlySet<ColumnKey> = new Set<ColumnKey>([
   'lp',
@@ -30,6 +30,13 @@ export const NUMERIC_COLUMNS: ReadonlySet<ColumnKey> = new Set<ColumnKey>([
 ]);
 
 export const MAX_EXPORT_ROWS = 10000;
+const STORAGE_KEY = 'heli_catalog_supabase_config_v1';
+
+export interface SupabaseConnectionConfig {
+  url: string;
+  anonKey: string;
+  tableName: string;
+}
 
 export interface CatalogQueryParams {
   page: number;
@@ -40,6 +47,15 @@ export interface CatalogQueryParams {
   truckSeries: string;
   partGroup: string;
   filters: Partial<ColumnFilters>;
+}
+
+export interface ConnectionTestResult {
+  ok: boolean;
+  message: string;
+  rowCountEstimate?: number;
+  mappedColumns?: Record<ColumnKey, string>;
+  detectedRawColumns?: string[];
+  emptyTableHint?: boolean;
 }
 
 interface ParsedNumericFilter {
@@ -64,10 +80,35 @@ const DEFAULT_COLUMN_MAP: Record<ColumnKey, string> = {
 const COLUMN_CANDIDATES: Record<ColumnKey, string[]> = {
   lp: ['lp', 'id', 'nr', 'numerporzadkowy', 'numer', 'row_number', 'index'],
   modelWozka: ['modelwozka', 'model', 'wozek', 'forkliftmodel', 'truckmodel', 'modelpdf'],
-  nrKatalogowy: ['nrkatalogowy', 'numerkatalogowy', 'kodczesci', 'partnumber', 'partno', 'kod', 'sku', 'nrkat'],
+  nrKatalogowy: [
+    'nrkatalogowy',
+    'numerkatalogowy',
+    'kodczesci',
+    'partnumber',
+    'partno',
+    'kod',
+    'sku',
+    'nrkat',
+  ],
   nazwaPl: ['nazwatowarupl', 'nazwapl', 'nazwa_pl', 'polskanazwa', 'opispl', 'namepl', 'towarpl'],
-  nazwaEn: ['nazwatowaruen', 'nazwaen', 'nazwa_en', 'englishname', 'nameen', 'descriptionen', 'towaren'],
-  nazwaCn: ['nazwatowarucn', 'nazwacn', 'nazwa_cn', 'chinesename', 'namecn', 'nazwachinska', 'towarcn'],
+  nazwaEn: [
+    'nazwatowaruen',
+    'nazwaen',
+    'nazwa_en',
+    'englishname',
+    'nameen',
+    'descriptionen',
+    'towaren',
+  ],
+  nazwaCn: [
+    'nazwatowarucn',
+    'nazwacn',
+    'nazwa_cn',
+    'chinesename',
+    'namecn',
+    'nazwachinska',
+    'towarcn',
+  ],
   ilosc: ['ilosc', 'qty', 'quantity', 'sztuk', 'liczbasztuk'],
   uwagi: ['uwagi', 'remarks', 'specyfikacja', 'notatki', 'notes', 'comment', 'komentarz'],
   stronaPdf: ['stronawpdf', 'stronapdf', 'pdfpage', 'page', 'strona', 'nrstrony'],
@@ -88,82 +129,159 @@ function normalizeHeader(value: string): string {
     .replace(/[^a-z0-9]/g, '');
 }
 
-function getTableName(): string {
-  const raw = (process.env.SUPABASE_TABLE_NAME || 'katalog_heli').trim();
-  // Restrict table identifier strictly to safe SQL identifier chars
-  return /^[a-zA-Z0-9_]+$/.test(raw) ? raw : 'katalog_heli';
+function sanitizeTableName(raw: string): string {
+  const cleaned = raw.trim();
+  return /^[a-zA-Z0-9_]+$/.test(cleaned) ? cleaned : 'katalog_heli';
 }
 
-function getSupabaseClient(): SupabaseClient | null {
-  const url = (process.env.SUPABASE_URL || '').trim();
-  const key = (process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SUPABASE_ANON_KEY || '').trim();
+/**
+ * Prevents accidentally saving a privileged Supabase service_role JWT in browser storage.
+ */
+export function isServiceRoleKey(key: string): boolean {
+  const trimmed = key.trim();
+  if (trimmed.startsWith('sb_secret_')) return true;
+  const parts = trimmed.split('.');
+  if (parts.length !== 3) return false;
+  try {
+    const base64 = parts[1].replace(/-/g, '+').replace(/_/g, '/');
+    const json = atob(base64);
+    const payload = JSON.parse(json) as { role?: string };
+    return payload.role === 'service_role';
+  } catch {
+    return false;
+  }
+}
 
-  if (!url || !key) {
-    return null;
+export function validateSupabaseConfig(config: SupabaseConnectionConfig): string | null {
+  const url = config.url.trim();
+  const anonKey = config.anonKey.trim();
+  const tableName = config.tableName.trim();
+
+  if (!url) {
+    return 'Podaj adres URL projektu Supabase (np. https://xxxx.supabase.co).';
   }
 
   try {
     const parsed = new URL(url);
-    if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
-      return null;
+    if (parsed.protocol !== 'https:') {
+      return 'Adres Supabase URL musi zaczynać się od https://.';
     }
+    const host = parsed.hostname.toLowerCase();
+    if (host === 'localhost' || host === '127.0.0.1' || host.endsWith('.local')) {
+      return 'Podaj publiczny adres projektu Supabase (https://...supabase.co).';
+    }
+  } catch {
+    return 'Nieprawidłowy format adresu URL projektu Supabase.';
+  }
+
+  if (!anonKey) {
+    return 'Podaj publiczny klucz Supabase (anon / publishable key).';
+  }
+
+  if (isServiceRoleKey(anonKey)) {
+    return 'Wykryto klucz service_role / secret! W aplikacji przeglądarkowej i na GitHub Pages używaj wyłącznie publicznego klucza anon / publishable z polityką RLS.';
+  }
+
+  if (!tableName || !/^[a-zA-Z0-9_]+$/.test(tableName)) {
+    return 'Nazwa tabeli może zawierać wyłącznie litery, cyfry oraz znak podkreślenia (_).';
+  }
+
+  return null;
+}
+
+export function getSavedSupabaseConfig(): SupabaseConnectionConfig | null {
+  try {
+    const raw = window.localStorage.getItem(STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Partial<SupabaseConnectionConfig>;
+    if (!parsed.url || !parsed.anonKey) return null;
+    return {
+      url: String(parsed.url).trim(),
+      anonKey: String(parsed.anonKey).trim(),
+      tableName: sanitizeTableName(String(parsed.tableName || 'katalog_heli')),
+    };
   } catch {
     return null;
   }
+}
 
-  const configKey = `${url}::${key.slice(0, 12)}`;
-  if (cachedClient && cachedConfigKey === configKey) {
-    return cachedClient;
+export function getEnvSupabaseConfig(): SupabaseConnectionConfig | null {
+  const url = (import.meta.env.VITE_SUPABASE_URL || '').trim();
+  const anonKey = (import.meta.env.VITE_SUPABASE_ANON_KEY || '').trim();
+  const tableName = sanitizeTableName(import.meta.env.VITE_SUPABASE_TABLE_NAME || 'katalog_heli');
+  if (!url || !anonKey) return null;
+  return { url, anonKey, tableName };
+}
+
+export function getActiveSupabaseConfig(): {
+  config: SupabaseConnectionConfig | null;
+  source: 'storage' | 'env' | 'demo';
+} {
+  const saved = getSavedSupabaseConfig();
+  if (saved && !validateSupabaseConfig(saved)) {
+    return { config: saved, source: 'storage' };
   }
+  const env = getEnvSupabaseConfig();
+  if (env && !validateSupabaseConfig(env)) {
+    return { config: env, source: 'env' };
+  }
+  return { config: null, source: 'demo' };
+}
 
-  cachedClient = createClient(url, key, {
+export function saveSupabaseConfig(config: SupabaseConnectionConfig): void {
+  const error = validateSupabaseConfig(config);
+  if (error) {
+    throw new Error(error);
+  }
+  const normalized: SupabaseConnectionConfig = {
+    url: config.url.trim().replace(/\/+$/, ''),
+    anonKey: config.anonKey.trim(),
+    tableName: sanitizeTableName(config.tableName || 'katalog_heli'),
+  };
+  window.localStorage.setItem(STORAGE_KEY, JSON.stringify(normalized));
+  resetSupabaseCache();
+}
+
+export function clearSupabaseConfig(): void {
+  window.localStorage.removeItem(STORAGE_KEY);
+  resetSupabaseCache();
+}
+
+export function resetSupabaseCache(): void {
+  cachedClient = null;
+  cachedConfigKey = '';
+  cachedColumnMap = null;
+  cachedColumnMapTime = 0;
+}
+
+function createScopedClient(config: SupabaseConnectionConfig): SupabaseClient {
+  return createClient(config.url, config.anonKey, {
     auth: {
       persistSession: false,
       autoRefreshToken: false,
+      detectSessionInUrl: false,
     },
   });
+}
+
+function getSupabaseClient(): { client: SupabaseClient; tableName: string } | null {
+  const { config } = getActiveSupabaseConfig();
+  if (!config) return null;
+
+  const configKey = `${config.url}::${config.tableName}::${config.anonKey.slice(0, 12)}`;
+  if (cachedClient && cachedConfigKey === configKey) {
+    return { client: cachedClient, tableName: config.tableName };
+  }
+
+  cachedClient = createScopedClient(config);
   cachedConfigKey = configKey;
   cachedColumnMap = null;
-  return cachedClient;
+  cachedColumnMapTime = 0;
+  return { client: cachedClient, tableName: config.tableName };
 }
 
-function applyEnvColumnOverrides(base: Record<ColumnKey, string>): Record<ColumnKey, string> {
-  const envMap: Partial<Record<ColumnKey, string | undefined>> = {
-    lp: process.env.SUPABASE_COL_LP,
-    modelWozka: process.env.SUPABASE_COL_MODEL,
-    nrKatalogowy: process.env.SUPABASE_COL_PART_NO,
-    nazwaPl: process.env.SUPABASE_COL_NAME_PL,
-    nazwaEn: process.env.SUPABASE_COL_NAME_EN,
-    nazwaCn: process.env.SUPABASE_COL_NAME_CN,
-    ilosc: process.env.SUPABASE_COL_QTY,
-    uwagi: process.env.SUPABASE_COL_REMARKS,
-    stronaPdf: process.env.SUPABASE_COL_PDF_PAGE,
-  };
-
-  const result = { ...base };
-  for (const key of Object.keys(envMap) as ColumnKey[]) {
-    const val = envMap[key]?.trim();
-    if (val && val.length <= 120) {
-      result[key] = val;
-    }
-  }
-  return result;
-}
-
-async function resolveColumnMap(client: SupabaseClient): Promise<Record<ColumnKey, string>> {
-  const now = Date.now();
-  if (cachedColumnMap && now - cachedColumnMapTime < 5 * 60 * 1000) {
-    return cachedColumnMap;
-  }
-
-  const table = getTableName();
-  const { data, error } = await client.from(table).select('*').limit(1);
-
-  if (error || !data || data.length === 0) {
-    return applyEnvColumnOverrides(DEFAULT_COLUMN_MAP);
-  }
-
-  const actualKeys = Object.keys(data[0] as Record<string, unknown>);
+function inferColumnMapFromRow(sampleRow: Record<string, unknown>): Record<ColumnKey, string> {
+  const actualKeys = Object.keys(sampleRow);
   const normalizedPairs = actualKeys.map((actual) => ({
     actual,
     norm: normalizeHeader(actual),
@@ -174,11 +292,9 @@ async function resolveColumnMap(client: SupabaseClient): Promise<Record<ColumnKe
 
   for (const canonical of Object.keys(COLUMN_CANDIDATES) as ColumnKey[]) {
     const candidates = COLUMN_CANDIDATES[canonical];
-    // 1. Exact normalized match
     let matched = normalizedPairs.find(
       (p) => !used.has(p.actual) && candidates.includes(p.norm)
     );
-    // 2. Partial containment fallback
     if (!matched) {
       matched = normalizedPairs.find(
         (p) =>
@@ -192,14 +308,95 @@ async function resolveColumnMap(client: SupabaseClient): Promise<Record<ColumnKe
     }
   }
 
-  const finalMap = applyEnvColumnOverrides(resolved);
-  cachedColumnMap = finalMap;
-  cachedColumnMapTime = now;
-  return finalMap;
+  return resolved;
 }
 
-export function sanitizePostgrestTerm(raw: string): string {
-  // Strip PostgREST syntax delimiters & wildcard injection characters
+async function resolveColumnMap(
+  client: SupabaseClient,
+  tableName: string
+): Promise<Record<ColumnKey, string>> {
+  const now = Date.now();
+  if (cachedColumnMap && now - cachedColumnMapTime < 5 * 60 * 1000) {
+    return cachedColumnMap;
+  }
+
+  const { data, error } = await client.from(tableName).select('*').limit(1);
+  if (error || !data || data.length === 0) {
+    return DEFAULT_COLUMN_MAP;
+  }
+
+  const inferred = inferColumnMapFromRow(data[0] as Record<string, unknown>);
+  cachedColumnMap = inferred;
+  cachedColumnMapTime = now;
+  return inferred;
+}
+
+export async function testSupabaseConnection(
+  config: SupabaseConnectionConfig
+): Promise<ConnectionTestResult> {
+  const validationError = validateSupabaseConfig(config);
+  if (validationError) {
+    return { ok: false, message: validationError };
+  }
+
+  const normalized: SupabaseConnectionConfig = {
+    url: config.url.trim().replace(/\/+$/, ''),
+    anonKey: config.anonKey.trim(),
+    tableName: sanitizeTableName(config.tableName || 'katalog_heli'),
+  };
+
+  try {
+    const client = createScopedClient(normalized);
+    const { data, error } = await client.from(normalized.tableName).select('*').limit(1);
+
+    if (error) {
+      return {
+        ok: false,
+        message: `Błąd połączenia z tabelą "${normalized.tableName}": ${error.message}`,
+      };
+    }
+
+    const { count } = await client
+      .from(normalized.tableName)
+      .select('*', { count: 'estimated', head: true });
+
+    const rows = (data || []) as Record<string, unknown>[];
+    if (rows.length === 0) {
+      return {
+        ok: true,
+        rowCountEstimate: count ?? 0,
+        mappedColumns: DEFAULT_COLUMN_MAP,
+        detectedRawColumns: [],
+        emptyTableHint: true,
+        message:
+          'Połączono z Supabase, ale zapytanie zwróciło 0 wierszy. Sprawdź, czy tabela zawiera dane oraz czy włączono politykę RLS zezwalającą na odczyt (SELECT).',
+      };
+    }
+
+    const mappedColumns = inferColumnMapFromRow(rows[0]);
+    const detectedRawColumns = Object.keys(rows[0]);
+
+    return {
+      ok: true,
+      rowCountEstimate: typeof count === 'number' ? count : rows.length,
+      mappedColumns,
+      detectedRawColumns,
+      message: `Połączono pomyślnie z tabelą ${normalized.tableName} (${
+        typeof count === 'number' ? `ok. ${count.toLocaleString('pl-PL')} rekordów` : 'wykryto rekordy'
+      }).`,
+    };
+  } catch (err: unknown) {
+    return {
+      ok: false,
+      message:
+        err instanceof Error
+          ? `Nie udało się połączyć z Supabase: ${err.message}`
+          : 'Nie udało się nawiązać połączenia z Supabase.',
+    };
+  }
+}
+
+function sanitizePostgrestTerm(raw: string): string {
   return raw
     .trim()
     .slice(0, 120)
@@ -213,11 +410,10 @@ function quotePostgrestCol(col: string): string {
   return `"${safe}"`;
 }
 
-export function parseNumericFilter(raw: string): ParsedNumericFilter | null {
+function parseNumericFilter(raw: string): ParsedNumericFilter | null {
   const cleaned = raw.trim().replace(/\s+/g, '');
   if (!cleaned) return null;
 
-  // Range: 10-50 or 10..50
   const rangeMatch = cleaned.match(/^(\d+(?:[.,]\d+)?)(?:-|–|\.\.)(\d+(?:[.,]\d+)?)$/);
   if (rangeMatch) {
     const a = Number(rangeMatch[1].replace(',', '.'));
@@ -428,26 +624,24 @@ function applySupabaseFilters(query: any, params: CatalogQueryParams, colMap: Re
 }
 
 export async function getCatalogMeta(): Promise<CatalogMetaResponse> {
-  const tableName = getTableName();
-  const client = getSupabaseClient();
-
-  if (!client) {
+  const conn = getSupabaseClient();
+  if (!conn) {
     return {
       mode: 'demo',
-      tableName,
+      tableName: 'katalog_heli',
       totalEstimate: DEMO_CATALOG.length,
       mappedColumns: DEFAULT_COLUMN_MAP,
       connectionNotice:
-        'Tryb podglądu katalogu HELI. Ustaw SUPABASE_URL i SUPABASE_ANON_KEY w Secrets, aby podpiąć pełną tabelę katalog_heli (582 317 rekordów).',
+        'Tryb podglądu katalogu HELI. Kliknij „Konfiguracja” w górnym panelu, aby zapisać dane połączenia z Supabase (katalog_heli).',
       maxExportRows: MAX_EXPORT_ROWS,
     };
   }
 
-  const colMap = await resolveColumnMap(client);
+  const colMap = await resolveColumnMap(conn.client, conn.tableName);
   let totalEstimate = 0;
 
-  const { count, error } = await client
-    .from(tableName)
+  const { count, error } = await conn.client
+    .from(conn.tableName)
     .select('*', { count: 'estimated', head: true });
 
   if (!error && typeof count === 'number') {
@@ -456,7 +650,7 @@ export async function getCatalogMeta(): Promise<CatalogMetaResponse> {
 
   return {
     mode: 'supabase',
-    tableName,
+    tableName: conn.tableName,
     totalEstimate,
     mappedColumns: colMap,
     maxExportRows: MAX_EXPORT_ROWS,
@@ -464,9 +658,9 @@ export async function getCatalogMeta(): Promise<CatalogMetaResponse> {
 }
 
 export async function queryCatalogParts(params: CatalogQueryParams): Promise<CatalogPartsResponse> {
-  const client = getSupabaseClient();
+  const conn = getSupabaseClient();
 
-  if (!client) {
+  if (!conn) {
     const allFiltered = applyDemoFiltering(params);
     const total = allFiltered.length;
     const totalPages = Math.max(1, Math.ceil(total / params.pageSize));
@@ -484,8 +678,7 @@ export async function queryCatalogParts(params: CatalogQueryParams): Promise<Cat
     };
   }
 
-  const tableName = getTableName();
-  const colMap = await resolveColumnMap(client);
+  const colMap = await resolveColumnMap(conn.client, conn.tableName);
   const sortCol = colMap[params.sortBy];
   const from = (params.page - 1) * params.pageSize;
   const to = from + params.pageSize - 1;
@@ -496,20 +689,18 @@ export async function queryCatalogParts(params: CatalogQueryParams): Promise<Cat
     params.partGroup !== 'all' ||
     Object.values(params.filters).some((v) => Boolean(v?.trim()));
 
-  // For unfiltered 582k rows, 'estimated' avoids full sequential scan timeout while remaining instant.
   const countMode = hasActiveFilters ? 'exact' : 'estimated';
 
-  let query = client.from(tableName).select('*', { count: countMode });
+  let query = conn.client.from(conn.tableName).select('*', { count: countMode });
   query = applySupabaseFilters(query, params, colMap);
   query = query.order(sortCol, { ascending: params.sortDir === 'asc', nullsFirst: false });
   query = query.range(from, to);
 
   let { data, count, error } = await query;
-
-  // Fallback to estimated count if exact count timed out on broad ILIKE query
   let totalIsEstimate = countMode === 'estimated';
+
   if (error && countMode === 'exact') {
-    let retryQuery = client.from(tableName).select('*', { count: 'estimated' });
+    let retryQuery = conn.client.from(conn.tableName).select('*', { count: 'estimated' });
     retryQuery = applySupabaseFilters(retryQuery, params, colMap);
     retryQuery = retryQuery.order(sortCol, {
       ascending: params.sortDir === 'asc',
@@ -524,7 +715,7 @@ export async function queryCatalogParts(params: CatalogQueryParams): Promise<Cat
   }
 
   if (error) {
-    throw new Error(`Błąd zapytania Supabase (${tableName}): ${error.message}`);
+    throw new Error(`Błąd zapytania Supabase (${conn.tableName}): ${error.message}`);
   }
 
   const rows = (data || []) as Record<string, unknown>[];
@@ -545,7 +736,6 @@ export async function queryCatalogParts(params: CatalogQueryParams): Promise<Cat
 
 function escapeCsvCell(rawValue: unknown): string {
   let str = rawValue === null || rawValue === undefined ? '' : String(rawValue);
-  // Neutralize spreadsheet formula injection (CSV Injection protection)
   if (/^[=+\-@\t\r]/.test(str)) {
     str = `'${str}`;
   }
@@ -559,23 +749,22 @@ function escapeCsvCell(rawValue: unknown): string {
 export async function exportCatalogCsv(
   params: CatalogQueryParams
 ): Promise<{ csv: string; rowCount: number; truncated: boolean }> {
-  const client = getSupabaseClient();
+  const conn = getSupabaseClient();
   let items: CatalogPart[] = [];
   let truncated = false;
 
-  if (!client) {
+  if (!conn) {
     const allFiltered = applyDemoFiltering(params);
     truncated = allFiltered.length > MAX_EXPORT_ROWS;
     items = allFiltered.slice(0, MAX_EXPORT_ROWS);
   } else {
-    const tableName = getTableName();
-    const colMap = await resolveColumnMap(client);
+    const colMap = await resolveColumnMap(conn.client, conn.tableName);
     const sortCol = colMap[params.sortBy];
     const batchSize = 1000;
     let offset = 0;
 
     while (items.length < MAX_EXPORT_ROWS) {
-      let query = client.from(tableName).select('*');
+      let query = conn.client.from(conn.tableName).select('*');
       query = applySupabaseFilters(query, params, colMap);
       query = query.order(sortCol, { ascending: params.sortDir === 'asc', nullsFirst: false });
       query = query.range(offset, offset + batchSize - 1);
@@ -613,7 +802,6 @@ export async function exportCatalogCsv(
     'Strona w PDF',
   ];
 
-  // UTF-8 BOM + semicolon separator for instant Polish Excel & CJK compatibility
   const lines = [headers.map(escapeCsvCell).join(';')];
   for (const item of items) {
     lines.push(
