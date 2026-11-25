@@ -78,7 +78,7 @@ const DEFAULT_COLUMN_MAP: Record<ColumnKey, string> = {
 };
 
 const COLUMN_CANDIDATES: Record<ColumnKey, string[]> = {
-  lp: ['lp', 'id', 'nr', 'numerporzadkowy', 'numer', 'row_number', 'index'],
+  lp: ['lp', 'id', 'nr', 'numerporzadkowy', 'numer', 'rownumber', 'index'],
   modelWozka: ['modelwozka', 'model', 'wozek', 'forkliftmodel', 'truckmodel', 'modelpdf'],
   nrKatalogowy: [
     'nrkatalogowy',
@@ -90,34 +90,52 @@ const COLUMN_CANDIDATES: Record<ColumnKey, string[]> = {
     'sku',
     'nrkat',
   ],
-  nazwaPl: ['nazwatowarupl', 'nazwapl', 'nazwa_pl', 'polskanazwa', 'opispl', 'namepl', 'towarpl'],
+  nazwaPl: [
+    'nazwatowarupl',
+    'nazwapl',
+    'nazwaczescipl',
+    'polskanazwa',
+    'opispl',
+    'namepl',
+    'towarpl',
+    'produktpl',
+  ],
   nazwaEn: [
     'nazwatowaruen',
     'nazwaen',
-    'nazwa_en',
+    'nazwaczescien',
     'englishname',
     'nameen',
     'descriptionen',
     'towaren',
+    'produkten',
   ],
   nazwaCn: [
     'nazwatowarucn',
     'nazwacn',
-    'nazwa_cn',
+    'nazwaczescicn',
     'chinesename',
     'namecn',
     'nazwachinska',
     'towarcn',
+    'produktcn',
   ],
   ilosc: ['ilosc', 'qty', 'quantity', 'sztuk', 'liczbasztuk'],
   uwagi: ['uwagi', 'remarks', 'specyfikacja', 'notatki', 'notes', 'comment', 'komentarz'],
   stronaPdf: ['stronawpdf', 'stronapdf', 'pdfpage', 'page', 'strona', 'nrstrony'],
 };
 
+const EXACT_ONLY_FALLBACKS: Partial<Record<ColumnKey, string[]>> = {
+  nazwaPl: ['nazwatowaru', 'nazwa', 'pl', 'opis'],
+  nazwaEn: ['en', 'name', 'description'],
+  nazwaCn: ['cn', 'zh'],
+};
+
 let cachedClient: SupabaseClient | null = null;
 let cachedConfigKey = '';
 let cachedColumnMap: Record<ColumnKey, string> | null = null;
 let cachedNumericCols: ReadonlySet<ColumnKey> | null = null;
+let cachedPresentCols: ReadonlySet<ColumnKey> | null = null;
 let cachedColumnMapTime = 0;
 
 function normalizeHeader(value: string): string {
@@ -253,6 +271,7 @@ export function resetSupabaseCache(): void {
   cachedConfigKey = '';
   cachedColumnMap = null;
   cachedNumericCols = null;
+  cachedPresentCols = null;
   cachedColumnMapTime = 0;
 }
 
@@ -279,6 +298,7 @@ function getSupabaseClient(): { client: SupabaseClient; tableName: string } | nu
   cachedConfigKey = configKey;
   cachedColumnMap = null;
   cachedNumericCols = null;
+  cachedPresentCols = null;
   cachedColumnMapTime = 0;
   return { client: cachedClient, tableName: config.tableName };
 }
@@ -286,6 +306,7 @@ function getSupabaseClient(): { client: SupabaseClient; tableName: string } | nu
 function inferColumnMapFromRow(sampleRow: Record<string, unknown>): {
   colMap: Record<ColumnKey, string>;
   numericCols: ReadonlySet<ColumnKey>;
+  presentCols: ReadonlySet<ColumnKey>;
 } {
   const actualKeys = Object.keys(sampleRow);
   const normalizedPairs = actualKeys.map((actual) => ({
@@ -295,22 +316,48 @@ function inferColumnMapFromRow(sampleRow: Record<string, unknown>): {
 
   const resolved: Record<ColumnKey, string> = { ...DEFAULT_COLUMN_MAP };
   const used = new Set<string>();
+  const presentCols = new Set<ColumnKey>();
 
+  // Pass 1: exact normalized match against primary candidates
   for (const canonical of Object.keys(COLUMN_CANDIDATES) as ColumnKey[]) {
     const candidates = COLUMN_CANDIDATES[canonical];
-    let matched = normalizedPairs.find(
+    const matched = normalizedPairs.find(
       (p) => !used.has(p.actual) && candidates.includes(p.norm)
     );
-    if (!matched) {
-      matched = normalizedPairs.find(
-        (p) =>
-          !used.has(p.actual) &&
-          candidates.some((cand) => cand.length >= 3 && p.norm.includes(cand))
-      );
-    }
     if (matched) {
       resolved[canonical] = matched.actual;
       used.add(matched.actual);
+      presentCols.add(canonical);
+    }
+  }
+
+  // Pass 2: substring containment match for remaining columns
+  for (const canonical of Object.keys(COLUMN_CANDIDATES) as ColumnKey[]) {
+    if (presentCols.has(canonical)) continue;
+    const candidates = COLUMN_CANDIDATES[canonical];
+    const matched = normalizedPairs.find(
+      (p) =>
+        !used.has(p.actual) &&
+        candidates.some((cand) => cand.length >= 3 && p.norm.includes(cand))
+    );
+    if (matched) {
+      resolved[canonical] = matched.actual;
+      used.add(matched.actual);
+      presentCols.add(canonical);
+    }
+  }
+
+  // Pass 3: exact-only short fallbacks (e.g. "nazwa", "opis", "pl", "en", "cn")
+  for (const canonical of Object.keys(EXACT_ONLY_FALLBACKS) as ColumnKey[]) {
+    if (presentCols.has(canonical)) continue;
+    const fallbacks = EXACT_ONLY_FALLBACKS[canonical] || [];
+    const matched = normalizedPairs.find(
+      (p) => !used.has(p.actual) && fallbacks.includes(p.norm)
+    );
+    if (matched) {
+      resolved[canonical] = matched.actual;
+      used.add(matched.actual);
+      presentCols.add(canonical);
     }
   }
 
@@ -321,32 +368,48 @@ function inferColumnMapFromRow(sampleRow: Record<string, unknown>): {
     if (typeof val === 'number') {
       detectedNumeric.add(key);
     } else if (val === null || val === undefined) {
-      // Default to numeric for Lp/Ilość/Strona w PDF when first sample cell is null
       detectedNumeric.add(key);
     }
-    // If typeof val === 'string', keep it out of detectedNumeric so SQL ILIKE works directly!
   }
 
-  return { colMap: resolved, numericCols: detectedNumeric };
+  return { colMap: resolved, numericCols: detectedNumeric, presentCols };
 }
 
 async function resolveSchema(
   client: SupabaseClient,
   tableName: string
-): Promise<{ colMap: Record<ColumnKey, string>; numericCols: ReadonlySet<ColumnKey> }> {
+): Promise<{
+  colMap: Record<ColumnKey, string>;
+  numericCols: ReadonlySet<ColumnKey>;
+  presentCols: ReadonlySet<ColumnKey>;
+}> {
   const now = Date.now();
-  if (cachedColumnMap && cachedNumericCols && now - cachedColumnMapTime < 5 * 60 * 1000) {
-    return { colMap: cachedColumnMap, numericCols: cachedNumericCols };
+  if (
+    cachedColumnMap &&
+    cachedNumericCols &&
+    cachedPresentCols &&
+    now - cachedColumnMapTime < 5 * 60 * 1000
+  ) {
+    return {
+      colMap: cachedColumnMap,
+      numericCols: cachedNumericCols,
+      presentCols: cachedPresentCols,
+    };
   }
 
   const { data, error } = await client.from(tableName).select('*').limit(1);
   if (error || !data || data.length === 0) {
-    return { colMap: DEFAULT_COLUMN_MAP, numericCols: NUMERIC_COLUMNS };
+    return {
+      colMap: DEFAULT_COLUMN_MAP,
+      numericCols: NUMERIC_COLUMNS,
+      presentCols: ALLOWED_COLUMNS,
+    };
   }
 
   const inferred = inferColumnMapFromRow(data[0] as Record<string, unknown>);
   cachedColumnMap = inferred.colMap;
   cachedNumericCols = inferred.numericCols;
+  cachedPresentCols = inferred.presentCols;
   cachedColumnMapTime = now;
   return inferred;
 }
@@ -469,9 +532,26 @@ function matchesSqlLike(value: string, rawPattern: string): boolean {
   }
 }
 
-function quotePostgrestCol(col: string): string {
+/**
+ * Formats a PostgreSQL column identifier safely for PostgREST query parameters
+ * (`.ilike()`, `.eq()`, `.order()`, `.or()`).
+ * Columns containing spaces, parentheses like `(PL)`, uppercase letters, or Polish
+ * diacritics MUST be double-quoted so PostgREST does not parse parentheses as syntax.
+ */
+function formatPostgrestCol(col: string): string {
   const safe = col.replace(/"/g, '');
+  if (/^[a-z_][a-z0-9_]*$/.test(safe)) {
+    return safe;
+  }
   return `"${safe}"`;
+}
+
+function formatPostgrestOrValue(pattern: string): string {
+  const safe = pattern.replace(/"/g, '');
+  if (/[ .:;]/.test(safe)) {
+    return `"${safe}"`;
+  }
+  return safe;
 }
 
 function parseNumericFilter(raw: string): ParsedNumericFilter | null {
@@ -624,27 +704,31 @@ function applySupabaseFilters(
   query: any,
   params: CatalogQueryParams,
   colMap: Record<ColumnKey, string>,
-  numericCols: ReadonlySet<ColumnKey>
+  numericCols: ReadonlySet<ColumnKey>,
+  presentCols: ReadonlySet<ColumnKey>
 ) {
   let q = query;
 
   const seriesObj = TRUCK_SERIES_CATEGORIES.find((c) => c.id === params.truckSeries);
-  if (seriesObj && seriesObj.keywords.length > 0) {
+  if (seriesObj && seriesObj.keywords.length > 0 && presentCols.has('modelWozka')) {
+    const modelCol = formatPostgrestCol(colMap.modelWozka);
     if (seriesObj.keywords.length === 1) {
-      q = q.ilike(colMap.modelWozka, `${seriesObj.keywords[0]}%`);
+      q = q.ilike(modelCol, `${seriesObj.keywords[0]}%`);
     } else {
-      const seriesExprs = seriesObj.keywords
-        .map((kw) => `${quotePostgrestCol(colMap.modelWozka)}.ilike.${kw}*`);
+      const seriesExprs = seriesObj.keywords.map(
+        (kw) => `${modelCol}.ilike.${formatPostgrestOrValue(`${kw}*`)}`
+      );
       q = q.or(seriesExprs.join(','));
     }
   }
 
   const groupObj = PART_GROUP_CATEGORIES.find((c) => c.id === params.partGroup);
-  if (groupObj && groupObj.keywords.length > 0) {
+  if (groupObj && groupObj.keywords.length > 0 && presentCols.has('nazwaPl')) {
+    const plCol = formatPostgrestCol(colMap.nazwaPl);
     const groupExprs = groupObj.keywords
       .map((kw) => buildSqlLikePattern(kw, true))
       .filter(Boolean)
-      .map((pattern) => `${quotePostgrestCol(colMap.nazwaPl)}.ilike.${pattern}`);
+      .map((pattern) => `${plCol}.ilike.${formatPostgrestOrValue(pattern)}`);
     if (groupExprs.length > 0) {
       q = q.or(groupExprs.join(','));
     }
@@ -652,7 +736,7 @@ function applySupabaseFilters(
 
   const globalOrPattern = buildSqlLikePattern(params.globalSearch, true);
   if (globalOrPattern) {
-    const searchCols: ColumnKey[] = [
+    const candidateSearchCols: ColumnKey[] = [
       'modelWozka',
       'nrKatalogowy',
       'nazwaPl',
@@ -660,8 +744,11 @@ function applySupabaseFilters(
       'nazwaCn',
       'uwagi',
     ];
+    const existingSearchCols = candidateSearchCols.filter((c) => presentCols.has(c));
+    const searchCols = existingSearchCols.length > 0 ? existingSearchCols : candidateSearchCols;
+    const orVal = formatPostgrestOrValue(globalOrPattern);
     const orClauses = searchCols.map(
-      (colKey) => `${quotePostgrestCol(colMap[colKey])}.ilike.${globalOrPattern}`
+      (colKey) => `${formatPostgrestCol(colMap[colKey])}.ilike.${orVal}`
     );
     q = q.or(orClauses.join(','));
   }
@@ -670,7 +757,7 @@ function applySupabaseFilters(
     const rawFilter = params.filters[key]?.trim();
     if (!rawFilter) continue;
 
-    const dbCol = colMap[key];
+    const dbCol = formatPostgrestCol(colMap[key]);
     const isNumericDbCol = numericCols.has(key);
 
     if (isNumericDbCol) {
@@ -685,7 +772,7 @@ function applySupabaseFilters(
         continue;
       }
       // If user typed a SQL LIKE pattern (e.g. `12%`) on an integer/numeric PostgreSQL column,
-      // extract digits fallback or skip invalid text ilike on integer to prevent Postgres type error
+      // extract digits fallback so Postgres does not throw an integer ILIKE type error
       const digitsOnly = rawFilter.replace(/[^\d]/g, '');
       if (digitsOnly) {
         q = q.eq(dbCol, Number(digitsOnly));
@@ -693,7 +780,7 @@ function applySupabaseFilters(
       continue;
     }
 
-    // For all text columns (and numeric columns stored as text in Supabase), use true SQL ILIKE!
+    // For all text columns (including "Nazwa towaru (PL)", "(EN)", "(CN)"), use quoted SQL ILIKE!
     const likePattern = buildSqlLikePattern(rawFilter, false);
     if (likePattern) {
       q = q.ilike(dbCol, likePattern);
@@ -758,8 +845,8 @@ export async function queryCatalogParts(params: CatalogQueryParams): Promise<Cat
     };
   }
 
-  const { colMap, numericCols } = await resolveSchema(conn.client, conn.tableName);
-  const sortCol = colMap[params.sortBy];
+  const { colMap, numericCols, presentCols } = await resolveSchema(conn.client, conn.tableName);
+  const sortCol = formatPostgrestCol(colMap[params.sortBy]);
   const from = (params.page - 1) * params.pageSize;
   const to = from + params.pageSize - 1;
 
@@ -772,16 +859,17 @@ export async function queryCatalogParts(params: CatalogQueryParams): Promise<Cat
   const countMode = hasActiveFilters ? 'exact' : 'estimated';
 
   let query = conn.client.from(conn.tableName).select('*', { count: countMode });
-  query = applySupabaseFilters(query, params, colMap, numericCols);
+  query = applySupabaseFilters(query, params, colMap, numericCols, presentCols);
   query = query.order(sortCol, { ascending: params.sortDir === 'asc', nullsFirst: false });
   query = query.range(from, to);
 
   let { data, count, error } = await query;
   let totalIsEstimate = countMode === 'estimated';
 
+  // Fallback to fast planner count if exact count times out on 582k rows
   if (error && countMode === 'exact') {
-    let retryQuery = conn.client.from(conn.tableName).select('*', { count: 'estimated' });
-    retryQuery = applySupabaseFilters(retryQuery, params, colMap, numericCols);
+    let retryQuery = conn.client.from(conn.tableName).select('*', { count: 'planned' });
+    retryQuery = applySupabaseFilters(retryQuery, params, colMap, numericCols, presentCols);
     retryQuery = retryQuery.order(sortCol, {
       ascending: params.sortDir === 'asc',
       nullsFirst: false,
@@ -838,14 +926,14 @@ export async function exportCatalogCsv(
     truncated = allFiltered.length > MAX_EXPORT_ROWS;
     items = allFiltered.slice(0, MAX_EXPORT_ROWS);
   } else {
-    const { colMap, numericCols } = await resolveSchema(conn.client, conn.tableName);
-    const sortCol = colMap[params.sortBy];
+    const { colMap, numericCols, presentCols } = await resolveSchema(conn.client, conn.tableName);
+    const sortCol = formatPostgrestCol(colMap[params.sortBy]);
     const batchSize = 1000;
     let offset = 0;
 
     while (items.length < MAX_EXPORT_ROWS) {
       let query = conn.client.from(conn.tableName).select('*');
-      query = applySupabaseFilters(query, params, colMap, numericCols);
+      query = applySupabaseFilters(query, params, colMap, numericCols, presentCols);
       query = query.order(sortCol, { ascending: params.sortDir === 'asc', nullsFirst: false });
       query = query.range(offset, offset + batchSize - 1);
 
