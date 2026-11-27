@@ -3,6 +3,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { CatalogTable } from './components/CatalogTable';
 import { CatalogToolbar } from './components/CatalogToolbar';
 import { CategorySidebar } from './components/CategorySidebar';
+import { FilteringLoaderOverlay } from './components/FilteringLoaderOverlay';
 import { HelpModal } from './components/HelpModal';
 import { PaginationBar } from './components/PaginationBar';
 import { SupabaseConfigModal } from './components/SupabaseConfigModal';
@@ -505,6 +506,11 @@ export default function App() {
       />
 
       <HelpModal open={helpOpen} onClose={() => setHelpOpen(false)} meta={meta} />
+
+      <FilteringLoaderOverlay
+        visible={loading}
+        label={hasActiveFilters ? 'Filtrowanie katalogu…' : 'Wczytywanie katalogu…'}
+      />
 
       {/* Subtle transient feedback toast */}
       {toastMessage && (
