@@ -31,6 +31,8 @@ interface CatalogTableProps {
   onCopyPartNumber: (code: string) => void;
   onResetAll: () => void;
   hasActiveFilters: boolean;
+  isDemoMode?: boolean;
+  onOpenConfig?: () => void;
 }
 
 const numberFormatter = new Intl.NumberFormat('pl-PL');
@@ -50,6 +52,8 @@ export function CatalogTable({
   onCopyPartNumber,
   onResetAll,
   hasActiveFilters,
+  isDemoMode = false,
+  onOpenConfig,
 }: CatalogTableProps) {
   const activeColumns = CATALOG_COLUMNS.filter((col) => visibleColumns[col.key]);
 
@@ -196,19 +200,31 @@ export function CatalogTable({
                     Brak części spełniających wybrane kryteria
                   </h3>
                   <p className="text-xs text-[#475569] leading-relaxed">
-                    Żaden wpis w katalogu nie pasuje do bieżącej kombinacji kategorii i filtrów
-                    kolumnowych. Spróbuj rozszerzyć zapytanie lub zresetować filtry.
+                    {isDemoMode
+                      ? 'Aplikacja działa obecnie w trybie lokalnego podglądu (przykładowe 148 pozycji). Aby przeszukiwać własną bazę Supabase, zapisz dane połączenia w zakładce Konfiguracja.'
+                      : 'Żaden wpis w katalogu nie pasuje do bieżącej kombinacji kategorii i filtrów kolumnowych. Spróbuj rozszerzyć zapytanie lub zresetować filtry.'}
                   </p>
-                  {hasActiveFilters && (
-                    <button
-                      type="button"
-                      onClick={onResetAll}
-                      className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold text-white bg-[#D61F26] hover:bg-[#B91C1C] rounded-md transition-colors"
-                    >
-                      <RotateCcw className="w-3.5 h-3.5" aria-hidden="true" />
-                      <span>Wyczyść wszystkie filtry</span>
-                    </button>
-                  )}
+                  <div className="flex items-center justify-center gap-2">
+                    {isDemoMode && onOpenConfig && (
+                      <button
+                        type="button"
+                        onClick={onOpenConfig}
+                        className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold text-[#0F172A] bg-white hover:bg-[#F8FAFC] border border-[#CBD5E1] rounded-md transition-colors"
+                      >
+                        <span>Konfiguracja Supabase</span>
+                      </button>
+                    )}
+                    {hasActiveFilters && (
+                      <button
+                        type="button"
+                        onClick={onResetAll}
+                        className="inline-flex items-center gap-1.5 px-4 py-2 text-xs font-semibold text-white bg-[#D61F26] hover:bg-[#B91C1C] rounded-md transition-colors"
+                      >
+                        <RotateCcw className="w-3.5 h-3.5" aria-hidden="true" />
+                        <span>Wyczyść wszystkie filtry</span>
+                      </button>
+                    )}
+                  </div>
                 </div>
               </td>
             </tr>

@@ -1,4 +1,4 @@
-import { Download, Loader2 } from 'lucide-react';
+import { Check, Copy, Download, Loader2 } from 'lucide-react';
 
 interface TopBarProps {
   sidebarOpen: boolean;
@@ -9,6 +9,10 @@ interface TopBarProps {
   onFocusCatalog: () => void;
   onExportCsv: () => void;
   isExporting: boolean;
+  canCopyModels: boolean;
+  isCopyingModels: boolean;
+  modelsCopied: boolean;
+  onCopyModels: () => void;
 }
 
 export function TopBar({
@@ -20,7 +24,13 @@ export function TopBar({
   onFocusCatalog,
   onExportCsv,
   isExporting,
+  canCopyModels,
+  isCopyingModels,
+  modelsCopied,
+  onCopyModels,
 }: TopBarProps) {
+  const isModelsActive = canCopyModels && !isCopyingModels;
+
   return (
     <header className="sticky top-0 z-30 h-14 bg-white border-b border-[#E2E8F0] px-4 lg:px-6 flex items-center justify-between gap-8">
       {/* Zone 1: Brand Logo */}
@@ -83,8 +93,35 @@ export function TopBar({
         </button>
       </nav>
 
-      {/* Zone 3: Single Primary Action */}
-      <div className="flex items-center shrink-0">
+      {/* Zone 3: Primary Actions */}
+      <div className="flex items-center gap-2 shrink-0">
+        <button
+          type="button"
+          onClick={onCopyModels}
+          disabled={!canCopyModels || isCopyingModels}
+          title={
+            canCopyModels
+              ? 'Skopiuj unikalne modele wózków pasujące dokładnie do numeru katalogowego (rozdzielone przecinkiem)'
+              : 'Wpisz dokładny numer w polu „Nr katalogowy”, aby skopiować pasujące modele wózków'
+          }
+          className={`inline-flex items-center gap-1.5 px-3.5 py-2 text-xs font-semibold rounded-md transition-colors whitespace-nowrap shrink-0 focus-visible:outline-2 focus-visible:outline-offset-2 focus-visible:outline-[#EA580C] ${
+            canCopyModels
+              ? 'bg-[#EA580C] hover:bg-[#C2410C] text-white cursor-pointer disabled:opacity-70'
+              : 'bg-[#E2E8F0] text-[#94A3B8] border border-[#CBD5E1] cursor-not-allowed'
+          }`}
+        >
+          {isCopyingModels ? (
+            <Loader2 className="w-3.5 h-3.5 animate-spin" aria-hidden="true" />
+          ) : modelsCopied && isModelsActive ? (
+            <Check className="w-3.5 h-3.5" aria-hidden="true" />
+          ) : (
+            <Copy className="w-3.5 h-3.5" aria-hidden="true" />
+          )}
+          <span>
+            {isCopyingModels ? 'Kopiowanie…' : modelsCopied && isModelsActive ? 'Skopiowano' : 'Modele'}
+          </span>
+        </button>
+
         <button
           type="button"
           onClick={onExportCsv}

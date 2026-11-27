@@ -162,37 +162,6 @@ export function CatalogToolbar({
               </button>
             )}
           </div>
-
-          {/* Inline category selects visible when sidebar is collapsed or on compact viewports */}
-          {!sidebarOpen && (
-            <div className="flex items-center gap-2">
-              <select
-                aria-label="Wybierz serię wózka"
-                value={truckSeries}
-                onChange={(e) => onSelectTruckSeries(e.target.value)}
-                className="h-9 px-2.5 text-xs font-medium bg-white text-[#0F172A] border border-[#CBD5E1] rounded-md focus:border-[#D61F26] focus:outline-none"
-              >
-                {TRUCK_SERIES_CATEGORIES.map((s) => (
-                  <option key={s.id} value={s.id}>
-                    {s.label}
-                  </option>
-                ))}
-              </select>
-
-              <select
-                aria-label="Wybierz grupę podzespołów"
-                value={partGroup}
-                onChange={(e) => onSelectPartGroup(e.target.value)}
-                className="h-9 px-2.5 text-xs font-medium bg-white text-[#0F172A] border border-[#CBD5E1] rounded-md focus:border-[#D61F26] focus:outline-none"
-              >
-                {PART_GROUP_CATEGORIES.map((g) => (
-                  <option key={g.id} value={g.id}>
-                    {g.label}
-                  </option>
-                ))}
-              </select>
-            </div>
-          )}
         </div>
 
         {/* Right group: Unboxed metadata count + Column toggle + Reset */}

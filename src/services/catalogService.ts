@@ -86,6 +86,10 @@ const COLUMN_CANDIDATES: Record<ColumnKey, string[]> = {
     'kodczesci',
     'partnumber',
     'partno',
+    'symbol',
+    'indeks',
+    'kodtowaru',
+    'nrczesci',
     'kod',
     'sku',
     'nrkat',
@@ -275,12 +279,33 @@ export function resetSupabaseCache(): void {
   cachedColumnMapTime = 0;
 }
 
+const postgrestSafeFetch: typeof fetch = (input, init) => {
+  if (typeof input === 'string') {
+    const qIdx = input.indexOf('?');
+    if (qIdx !== -1 && input.indexOf('+', qIdx) !== -1) {
+      const fixed = `${input.slice(0, qIdx)}${input.slice(qIdx).replace(/\+/g, '%20')}`;
+      return globalThis.fetch(fixed, init);
+    }
+  } else if (input instanceof URL) {
+    const href = input.href;
+    const qIdx = href.indexOf('?');
+    if (qIdx !== -1 && href.indexOf('+', qIdx) !== -1) {
+      const fixed = `${href.slice(0, qIdx)}${href.slice(qIdx).replace(/\+/g, '%20')}`;
+      return globalThis.fetch(fixed, init);
+    }
+  }
+  return globalThis.fetch(input, init);
+};
+
 function createScopedClient(config: SupabaseConnectionConfig): SupabaseClient {
   return createClient(config.url, config.anonKey, {
     auth: {
       persistSession: false,
       autoRefreshToken: false,
       detectSessionInUrl: false,
+    },
+    global: {
+      fetch: postgrestSafeFetch,
     },
   });
 }
@@ -488,12 +513,13 @@ export async function testSupabaseConnection(
  * - Strips PostgREST syntax delimiters (`,`, `(`, `)`, `"`) to prevent filter injection.
  */
 function buildSqlLikePattern(raw: string, forPostgrestOr = false): string {
-  const cleaned = raw
-    .trim()
-    .slice(0, 120)
-    .replace(/[,()"\\]/g, ' ')
-    .replace(/\s+/g, ' ')
-    .trim();
+  const base = raw.trim().slice(0, 120);
+  const cleaned = forPostgrestOr
+    ? base
+        .replace(/[,()"\\]/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim()
+    : base;
 
   if (!cleaned) return '';
 
@@ -530,28 +556,6 @@ function matchesSqlLike(value: string, rawPattern: string): boolean {
   } catch {
     return value.toLowerCase().includes(rawPattern.trim().toLowerCase());
   }
-}
-
-/**
- * Formats a PostgreSQL column identifier safely for PostgREST query parameters
- * (`.ilike()`, `.eq()`, `.order()`, `.or()`).
- * Columns containing spaces, parentheses like `(PL)`, uppercase letters, or Polish
- * diacritics MUST be double-quoted so PostgREST does not parse parentheses as syntax.
- */
-function formatPostgrestCol(col: string): string {
-  const safe = col.replace(/"/g, '');
-  if (/^[a-z_][a-z0-9_]*$/.test(safe)) {
-    return safe;
-  }
-  return `"${safe}"`;
-}
-
-function formatPostgrestOrValue(pattern: string): string {
-  const safe = pattern.replace(/"/g, '');
-  if (/[ .:;]/.test(safe)) {
-    return `"${safe}"`;
-  }
-  return safe;
 }
 
 function parseNumericFilter(raw: string): ParsedNumericFilter | null {
@@ -699,36 +703,62 @@ function applyDemoFiltering(params: CatalogQueryParams): CatalogPart[] {
   return filtered;
 }
 
+type PostgrestQuoteMode = 'reserved' | 'spaces' | 'none';
+
+function hasPostgrestReservedChars(col: string): boolean {
+  return /[.,():<>]/.test(col);
+}
+
+function formatColForPostgrest(col: string, mode: PostgrestQuoteMode = 'reserved'): string {
+  const safe = col.replace(/"/g, '');
+  if (mode === 'none') return safe;
+  if (mode === 'spaces' && /[\s.,():<>]/.test(safe)) {
+    return `"${safe}"`;
+  }
+  if (mode === 'reserved' && hasPostgrestReservedChars(safe)) {
+    return `"${safe}"`;
+  }
+  return safe;
+}
+
+interface SupabaseFilterOptions {
+  quoteMode?: PostgrestQuoteMode;
+  skipReservedInOr?: boolean;
+  exactTextOnNoWildcard?: boolean;
+}
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function applySupabaseFilters(
   query: any,
   params: CatalogQueryParams,
   colMap: Record<ColumnKey, string>,
   numericCols: ReadonlySet<ColumnKey>,
-  presentCols: ReadonlySet<ColumnKey>
+  presentCols: ReadonlySet<ColumnKey>,
+  options: SupabaseFilterOptions = {}
 ) {
+  const quoteMode: PostgrestQuoteMode = options.quoteMode ?? 'reserved';
+  const skipReservedInOr = Boolean(options.skipReservedInOr);
+  const exactTextOnNoWildcard = Boolean(options.exactTextOnNoWildcard);
   let q = query;
 
   const seriesObj = TRUCK_SERIES_CATEGORIES.find((c) => c.id === params.truckSeries);
   if (seriesObj && seriesObj.keywords.length > 0 && presentCols.has('modelWozka')) {
-    const modelCol = formatPostgrestCol(colMap.modelWozka);
+    const modelCol = formatColForPostgrest(colMap.modelWozka, quoteMode);
     if (seriesObj.keywords.length === 1) {
       q = q.ilike(modelCol, `${seriesObj.keywords[0]}%`);
     } else {
-      const seriesExprs = seriesObj.keywords.map(
-        (kw) => `${modelCol}.ilike.${formatPostgrestOrValue(`${kw}*`)}`
-      );
+      const seriesExprs = seriesObj.keywords.map((kw) => `${modelCol}.ilike.${kw}*`);
       q = q.or(seriesExprs.join(','));
     }
   }
 
   const groupObj = PART_GROUP_CATEGORIES.find((c) => c.id === params.partGroup);
   if (groupObj && groupObj.keywords.length > 0 && presentCols.has('nazwaPl')) {
-    const plCol = formatPostgrestCol(colMap.nazwaPl);
+    const plCol = formatColForPostgrest(colMap.nazwaPl, quoteMode);
     const groupExprs = groupObj.keywords
       .map((kw) => buildSqlLikePattern(kw, true))
       .filter(Boolean)
-      .map((pattern) => `${plCol}.ilike.${formatPostgrestOrValue(pattern)}`);
+      .map((pattern) => `${plCol}.ilike.${pattern}`);
     if (groupExprs.length > 0) {
       q = q.or(groupExprs.join(','));
     }
@@ -745,10 +775,15 @@ function applySupabaseFilters(
       'uwagi',
     ];
     const existingSearchCols = candidateSearchCols.filter((c) => presentCols.has(c));
-    const searchCols = existingSearchCols.length > 0 ? existingSearchCols : candidateSearchCols;
-    const orVal = formatPostgrestOrValue(globalOrPattern);
+    let searchCols = existingSearchCols.length > 0 ? existingSearchCols : candidateSearchCols;
+    if (skipReservedInOr) {
+      const safeCols = searchCols.filter((c) => !hasPostgrestReservedChars(colMap[c]));
+      if (safeCols.length > 0) {
+        searchCols = safeCols;
+      }
+    }
     const orClauses = searchCols.map(
-      (colKey) => `${formatPostgrestCol(colMap[colKey])}.ilike.${orVal}`
+      (colKey) => `${formatColForPostgrest(colMap[colKey], quoteMode)}.ilike.${globalOrPattern}`
     );
     q = q.or(orClauses.join(','));
   }
@@ -757,7 +792,7 @@ function applySupabaseFilters(
     const rawFilter = params.filters[key]?.trim();
     if (!rawFilter) continue;
 
-    const dbCol = formatPostgrestCol(colMap[key]);
+    const dbCol = formatColForPostgrest(colMap[key], quoteMode);
     const isNumericDbCol = numericCols.has(key);
 
     if (isNumericDbCol) {
@@ -780,7 +815,11 @@ function applySupabaseFilters(
       continue;
     }
 
-    // For all text columns (including "Nazwa towaru (PL)", "(EN)", "(CN)"), use quoted SQL ILIKE!
+    if (exactTextOnNoWildcard && !/[%_*]/.test(rawFilter)) {
+      q = q.eq(dbCol, rawFilter);
+      continue;
+    }
+
     const likePattern = buildSqlLikePattern(rawFilter, false);
     if (likePattern) {
       q = q.ilike(dbCol, likePattern);
@@ -846,7 +885,7 @@ export async function queryCatalogParts(params: CatalogQueryParams): Promise<Cat
   }
 
   const { colMap, numericCols, presentCols } = await resolveSchema(conn.client, conn.tableName);
-  const sortCol = formatPostgrestCol(colMap[params.sortBy]);
+  const sortColRaw = colMap[params.sortBy];
   const from = (params.page - 1) * params.pageSize;
   const to = from + params.pageSize - 1;
 
@@ -856,39 +895,136 @@ export async function queryCatalogParts(params: CatalogQueryParams): Promise<Cat
     params.partGroup !== 'all' ||
     Object.values(params.filters).some((v) => Boolean(v?.trim()));
 
+  const runQuery = async (opts: {
+    countMode?: 'exact' | 'planned' | 'estimated';
+    withOrder: boolean;
+    filterOpts?: SupabaseFilterOptions;
+  }) => {
+    const selectOpts = opts.countMode ? { count: opts.countMode } : undefined;
+    let q = conn.client.from(conn.tableName).select('*', selectOpts);
+    q = applySupabaseFilters(q, params, colMap, numericCols, presentCols, opts.filterOpts);
+    if (opts.withOrder) {
+      const sortCol = formatColForPostgrest(sortColRaw, opts.filterOpts?.quoteMode ?? 'reserved');
+      q = q.order(sortCol, { ascending: params.sortDir === 'asc', nullsFirst: false });
+    }
+    q = q.range(from, to);
+    return q;
+  };
+
+  const isParseOrColErr = (err: { code?: string; message?: string } | null) =>
+    Boolean(
+      err &&
+        (err.code === 'PGRST100' ||
+          err.code === '42703' ||
+          /failed to parse|does not exist/i.test(err.message || ''))
+    );
+
+  const isTimeoutErr = (err: { code?: string; message?: string } | null) =>
+    Boolean(
+      err && (err.code === '57014' || /timeout|canceling statement/i.test(err.message || ''))
+    );
+
   const countMode = hasActiveFilters ? 'exact' : 'estimated';
-
-  let query = conn.client.from(conn.tableName).select('*', { count: countMode });
-  query = applySupabaseFilters(query, params, colMap, numericCols, presentCols);
-  query = query.order(sortCol, { ascending: params.sortDir === 'asc', nullsFirst: false });
-  query = query.range(from, to);
-
-  let { data, count, error } = await query;
   let totalIsEstimate = countMode === 'estimated';
 
-  // Fallback to fast planner count if exact count times out on 582k rows
-  if (error && countMode === 'exact') {
-    let retryQuery = conn.client.from(conn.tableName).select('*', { count: 'planned' });
-    retryQuery = applySupabaseFilters(retryQuery, params, colMap, numericCols, presentCols);
-    retryQuery = retryQuery.order(sortCol, {
-      ascending: params.sortDir === 'asc',
-      nullsFirst: false,
+  let activeFilterOpts: SupabaseFilterOptions = { quoteMode: 'reserved' };
+  let { data, count, error } = await runQuery({
+    countMode,
+    withOrder: true,
+    filterOpts: activeFilterOpts,
+  });
+
+  // Fallback 1a: if PostgREST rejected unquoted space columns, try quoting spaces + reserved chars
+  if (isParseOrColErr(error)) {
+    const spacesOpts: SupabaseFilterOptions = { quoteMode: 'spaces' };
+    const retrySpaces = await runQuery({
+      countMode,
+      withOrder: true,
+      filterOpts: spacesOpts,
     });
-    retryQuery = retryQuery.range(from, to);
-    const retry = await retryQuery;
+    if (!retrySpaces.error || isTimeoutErr(retrySpaces.error)) {
+      activeFilterOpts = spacesOpts;
+      data = retrySpaces.data;
+      count = retrySpaces.count;
+      error = retrySpaces.error;
+    }
+  }
+
+  // Fallback 1b: if PostgREST rejected quoted identifiers, retry unquoted (skipping parenthesized OR cols)
+  if (isParseOrColErr(error)) {
+    const noneOpts: SupabaseFilterOptions = {
+      quoteMode: 'none',
+      skipReservedInOr: Boolean(params.globalSearch.trim()),
+    };
+    const retryNone = await runQuery({
+      countMode,
+      withOrder: true,
+      filterOpts: noneOpts,
+    });
+    if (!retryNone.error || isTimeoutErr(retryNone.error)) {
+      activeFilterOpts = noneOpts;
+      data = retryNone.data;
+      count = retryNone.count;
+      error = retryNone.error;
+    }
+  }
+
+  // Fallback 2: if leading-wildcard ILIKE timed out on 582k rows, try fast index-friendly exact match
+  if (isTimeoutErr(error) && hasActiveFilters) {
+    const exactOpts: SupabaseFilterOptions = {
+      ...activeFilterOpts,
+      exactTextOnNoWildcard: true,
+    };
+    const retryExact = await runQuery({
+      countMode: 'exact',
+      withOrder: true,
+      filterOpts: exactOpts,
+    });
+    if (!retryExact.error && (retryExact.data?.length ?? 0) > 0) {
+      data = retryExact.data;
+      count = retryExact.count;
+      error = retryExact.error;
+      totalIsEstimate = false;
+    }
+  }
+
+  // Fallback 3: if exact count timed out on 582k rows, retry with fast planner count
+  if (error && countMode === 'exact') {
+    const retry = await runQuery({
+      countMode: 'planned',
+      withOrder: true,
+      filterOpts: activeFilterOpts,
+    });
     data = retry.data;
     count = retry.count;
     error = retry.error;
     totalIsEstimate = true;
   }
 
+  // Fallback 4: if query still timed out (57014) due to full-table scan + sort, drop count & sort
+  if (isTimeoutErr(error)) {
+    const retry = await runQuery({
+      countMode: undefined,
+      withOrder: false,
+      filterOpts: activeFilterOpts,
+    });
+    if (!retry.error) {
+      data = retry.data;
+      count = retry.count;
+      error = retry.error;
+      totalIsEstimate = true;
+    }
+  }
+
   if (error) {
-    throw new Error(`Błąd zapytania Supabase (${conn.tableName}): ${error.message}`);
+    const codeTag = error.code ? ` [${error.code}]` : '';
+    throw new Error(`Błąd zapytania Supabase (${conn.tableName})${codeTag}: ${error.message}`);
   }
 
   const rows = (data || []) as Record<string, unknown>[];
   const items = rows.map((row) => mapRawRow(row, colMap));
-  const total = typeof count === 'number' ? count : from + items.length;
+  const minKnownTotal = from + items.length;
+  const total = typeof count === 'number' ? Math.max(count, minKnownTotal) : minKnownTotal;
   const totalPages = Math.max(1, Math.ceil(total / params.pageSize));
 
   return {
@@ -927,7 +1063,7 @@ export async function exportCatalogCsv(
     items = allFiltered.slice(0, MAX_EXPORT_ROWS);
   } else {
     const { colMap, numericCols, presentCols } = await resolveSchema(conn.client, conn.tableName);
-    const sortCol = formatPostgrestCol(colMap[params.sortBy]);
+    const sortCol = formatColForPostgrest(colMap[params.sortBy], 'reserved');
     const batchSize = 1000;
     let offset = 0;
 
@@ -995,3 +1131,68 @@ export async function exportCatalogCsv(
     truncated,
   };
 }
+
+export async function fetchUniqueModelsForPartNumber(
+  params: CatalogQueryParams,
+  exactPartNumber: string
+): Promise<string[]> {
+  const trimmedTarget = exactPartNumber.trim();
+  const normalizedTarget = trimmedTarget.toLowerCase();
+  if (!normalizedTarget) return [];
+
+  const uniqueModels: string[] = [];
+  const seen = new Set<string>();
+
+  const collectModel = (rawNr: unknown, rawModel: unknown) => {
+    const nr = rawNr === null || rawNr === undefined ? '' : String(rawNr).trim();
+    if (nr.toLowerCase() !== normalizedTarget) return;
+    const model = rawModel === null || rawModel === undefined ? '' : String(rawModel).trim();
+    if (!model) return;
+    const dedupKey = model.toUpperCase();
+    if (!seen.has(dedupKey)) {
+      seen.add(dedupKey);
+      uniqueModels.push(model);
+    }
+  };
+
+  const conn = getSupabaseClient();
+  if (!conn) {
+    const allFiltered = applyDemoFiltering(params);
+    for (const item of allFiltered) {
+      collectModel(item.nrKatalogowy, item.modelWozka);
+    }
+    return uniqueModels;
+  }
+
+  const { colMap, numericCols, presentCols } = await resolveSchema(conn.client, conn.tableName);
+  const sortCol = formatColForPostgrest(colMap[params.sortBy], 'reserved');
+  const batchSize = 1000;
+  let offset = 0;
+  let scanned = 0;
+
+  while (scanned < MAX_EXPORT_ROWS) {
+    let query = conn.client.from(conn.tableName).select('*');
+    query = applySupabaseFilters(query, params, colMap, numericCols, presentCols);
+    query = query.order(sortCol, { ascending: params.sortDir === 'asc', nullsFirst: false });
+    query = query.range(offset, offset + batchSize - 1);
+
+    const { data, error } = await query;
+    if (error) {
+      throw new Error(`Błąd pobierania modeli wózków z Supabase: ${error.message}`);
+    }
+
+    const rows = (data || []) as Record<string, unknown>[];
+    for (const row of rows) {
+      collectModel(row[colMap.nrKatalogowy], row[colMap.modelWozka]);
+    }
+
+    scanned += rows.length;
+    if (rows.length < batchSize) {
+      break;
+    }
+    offset += batchSize;
+  }
+
+  return uniqueModels;
+}
+

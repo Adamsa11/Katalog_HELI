@@ -9,6 +9,7 @@ import { SupabaseConfigModal } from './components/SupabaseConfigModal';
 import { TopBar } from './components/TopBar';
 import {
   exportCatalogCsv,
+  fetchUniqueModelsForPartNumber,
   getCatalogMeta,
   queryCatalogParts,
 } from './services/catalogService';
@@ -54,7 +55,7 @@ export default function App() {
   const [debouncedColumnFilters, setDebouncedColumnFilters] =
     useState<ColumnFilters>(EMPTY_COLUMN_FILTERS);
 
-  const [sidebarOpen, setSidebarOpen] = useState(true);
+  const [sidebarOpen, setSidebarOpen] = useState(false);
   const [visibleColumns, setVisibleColumns] =
     useState<Record<ColumnKey, boolean>>(DEFAULT_VISIBLE_COLUMNS);
   const [columnsMenuOpen, setColumnsMenuOpen] = useState(false);
@@ -64,11 +65,14 @@ export default function App() {
   const [copiedCode, setCopiedCode] = useState<string | null>(null);
   const [toastMessage, setToastMessage] = useState<string | null>(null);
   const [isExporting, setIsExporting] = useState(false);
+  const [isCopyingModels, setIsCopyingModels] = useState(false);
+  const [modelsCopied, setModelsCopied] = useState(false);
   const [reloadNonce, setReloadNonce] = useState(0);
 
   const searchInputRef = useRef<HTMLInputElement | null>(null);
   const toastTimerRef = useRef<number | null>(null);
   const copyTimerRef = useRef<number | null>(null);
+  const modelsCopyTimerRef = useRef<number | null>(null);
   const activeRequestIdRef = useRef(0);
 
   const showToast = useCallback((message: string) => {
@@ -155,6 +159,33 @@ export default function App() {
     return Object.values(columnFilters).some((v) => v.trim().length > 0);
   }, [globalSearch, truckSeries, partGroup, columnFilters]);
 
+  // Extract deduplicated "Model wózka" values from currently loaded rows
+  // whose "Nr katalogowy" exactly equals the value typed in the "Nr katalogowy" filter.
+  const exactMatchedModelsOnPage = useMemo(() => {
+    const rawFilter = columnFilters.nrKatalogowy.trim();
+    const debouncedFilter = debouncedColumnFilters.nrKatalogowy.trim();
+    if (loading || !rawFilter) return [];
+    if (rawFilter.toLowerCase() !== debouncedFilter.toLowerCase()) return [];
+
+    const target = rawFilter.toLowerCase();
+    const unique: string[] = [];
+    const seen = new Set<string>();
+
+    for (const item of items) {
+      if (item.nrKatalogowy.trim().toLowerCase() !== target) continue;
+      const model = item.modelWozka.trim();
+      if (!model) continue;
+      const key = model.toUpperCase();
+      if (!seen.has(key)) {
+        seen.add(key);
+        unique.push(model);
+      }
+    }
+    return unique;
+  }, [columnFilters.nrKatalogowy, debouncedColumnFilters.nrKatalogowy, items, loading]);
+
+  const canCopyModels = exactMatchedModelsOnPage.length > 0;
+
   const handleSort = useCallback(
     (key: ColumnKey) => {
       if (sortBy === key) {
@@ -218,21 +249,32 @@ export default function App() {
     setVisibleColumns(DEFAULT_VISIBLE_COLUMNS);
   }, []);
 
+  const copyTextToClipboard = useCallback(async (text: string) => {
+    if (navigator.clipboard && navigator.clipboard.writeText) {
+      try {
+        await navigator.clipboard.writeText(text);
+        return;
+      } catch {
+        // Fallback to execCommand inside restricted iframes
+      }
+    }
+    const textarea = document.createElement('textarea');
+    textarea.value = text;
+    textarea.style.position = 'fixed';
+    textarea.style.opacity = '0';
+    document.body.appendChild(textarea);
+    textarea.select();
+    const ok = document.execCommand('copy');
+    document.body.removeChild(textarea);
+    if (!ok) {
+      throw new Error('Nie udało się skopiować do schowka.');
+    }
+  }, []);
+
   const handleCopyPartNumber = useCallback(
     async (code: string) => {
       try {
-        if (navigator.clipboard && navigator.clipboard.writeText) {
-          await navigator.clipboard.writeText(code);
-        } else {
-          const textarea = document.createElement('textarea');
-          textarea.value = code;
-          textarea.style.position = 'fixed';
-          textarea.style.opacity = '0';
-          document.body.appendChild(textarea);
-          textarea.select();
-          document.execCommand('copy');
-          document.body.removeChild(textarea);
-        }
+        await copyTextToClipboard(code);
         setCopiedCode(code);
         showToast(`Skopiowano numer katalogowy: ${code}`);
         if (copyTimerRef.current) {
@@ -245,8 +287,73 @@ export default function App() {
         showToast('Nie udało się skopiować numeru do schowka.');
       }
     },
-    [showToast]
+    [copyTextToClipboard, showToast]
   );
+
+  const handleCopyModels = useCallback(async () => {
+    const exactPartNo = columnFilters.nrKatalogowy.trim();
+    if (!canCopyModels || !exactPartNo) return;
+
+    setIsCopyingModels(true);
+    try {
+      const models =
+        total > items.length
+          ? await fetchUniqueModelsForPartNumber(
+              {
+                page: 1,
+                pageSize,
+                sortBy,
+                sortDir,
+                globalSearch: debouncedGlobal,
+                truckSeries,
+                partGroup,
+                filters: debouncedColumnFilters,
+              },
+              exactPartNo
+            )
+          : exactMatchedModelsOnPage;
+
+      if (models.length === 0) {
+        showToast('Brak modeli wózków do skopiowania dla podanego numeru katalogowego.');
+        return;
+      }
+
+      const formatted = models.join(', ');
+      await copyTextToClipboard(formatted);
+
+      setModelsCopied(true);
+      if (modelsCopyTimerRef.current) {
+        window.clearTimeout(modelsCopyTimerRef.current);
+      }
+      modelsCopyTimerRef.current = window.setTimeout(() => {
+        setModelsCopied(false);
+      }, 1800);
+
+      const preview = formatted.length > 72 ? `${formatted.slice(0, 72)}…` : formatted;
+      showToast(`Skopiowano modele (${models.length}): ${preview}`);
+    } catch (err: unknown) {
+      const msg =
+        err instanceof Error ? err.message : 'Nie udało się skopiować modeli wózków do schowka.';
+      showToast(msg);
+    } finally {
+      setIsCopyingModels(false);
+    }
+  }, [
+    canCopyModels,
+    columnFilters.nrKatalogowy,
+    total,
+    items.length,
+    pageSize,
+    sortBy,
+    sortDir,
+    debouncedGlobal,
+    truckSeries,
+    partGroup,
+    debouncedColumnFilters,
+    exactMatchedModelsOnPage,
+    copyTextToClipboard,
+    showToast,
+  ]);
 
   const handleExportCsv = useCallback(async () => {
     setIsExporting(true);
@@ -315,6 +422,10 @@ export default function App() {
         onFocusCatalog={handleFocusCatalog}
         onExportCsv={handleExportCsv}
         isExporting={isExporting}
+        canCopyModels={canCopyModels}
+        isCopyingModels={isCopyingModels}
+        modelsCopied={modelsCopied}
+        onCopyModels={handleCopyModels}
       />
 
       <div className="flex-1 flex min-h-0">
@@ -372,6 +483,8 @@ export default function App() {
             onCopyPartNumber={handleCopyPartNumber}
             onResetAll={handleResetAll}
             hasActiveFilters={hasActiveFilters}
+            isDemoMode={meta?.mode === 'demo'}
+            onOpenConfig={() => setConfigOpen(true)}
           />
 
           <PaginationBar
